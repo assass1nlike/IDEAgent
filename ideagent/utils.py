@@ -26,14 +26,6 @@ def read_jsonl(path: str | Path) -> list[dict[str, Any]]:
     return records
 
 
-def write_jsonl(path: str | Path, records: list[dict[str, Any]]) -> None:
-    output_path = Path(path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with output_path.open("w", encoding="utf-8") as handle:
-        for record in records:
-            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
-
-
 def append_jsonl(path: str | Path, record: dict[str, Any]) -> None:
     """Append a single record to a JSONL file (file must already exist)."""
     with Path(path).open("a", encoding="utf-8") as handle:

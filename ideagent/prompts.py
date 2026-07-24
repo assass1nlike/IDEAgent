@@ -103,24 +103,6 @@ def build_repair_critic_user(
     )
 
 
-def build_novelty_branch_critic_user(
-    idea_text: str,
-    *,
-    feedback_notes: list[str],
-    accepted: list[SemanticSignature],
-) -> str:
-    archive = "\n".join(f"- {s.compact()}" for s in accepted) or "(none yet)"
-    feedback = "\n".join(f"- {x}" for x in feedback_notes if x.strip()) or "(none)"
-    return (
-        f"COMPLETE PARENT IDEA:\n{idea_text.strip()}\n\n"
-        f"QUALITY-EVALUATOR EVIDENCE:\n{feedback}\n\n"
-        "ACTIVE AND HISTORICAL MECHANISM SIGNATURES (the branch must be distinct):\n"
-        f"{archive}\n\n"
-        f"{NON_OBVIOUSNESS_PRESSURE}\n\n"
-        "Return exactly one focused novelty-branch challenge."
-    )
-
-
 def build_relative_nb_user(idea_a: str, idea_b: str) -> str:
     return (
         "<UNTRUSTED_IDEA_A>\n" + idea_a.strip() + "\n</UNTRUSTED_IDEA_A>\n\n"
@@ -190,19 +172,6 @@ def op_free_baseline(prior_generated: list[SemanticSignature]) -> str:
     )
 
 
-def op_repair(idea_text: str, defect: str) -> str:
-    return "\n\n".join([
-        "Here is a promising idea that fell just short. Fix its SPECIFIC defect below while "
-        "keeping its non-obvious core and its problem -- do not abandon the idea or switch to a "
-        "different mechanism. Repair only what the defect names.",
-        f"IDEA:\n{idea_text.strip()}",
-        f"DEFECT TO FIX (from an independent panel):\n{defect.strip()}",
-        NON_OBVIOUSNESS_PRESSURE,
-        _SOUND_BY_CONSTRUCTION,
-        _RESTATE,
-    ])
-
-
 def op_critic_revision(
     idea_text: str, critic_challenge: str, *, mode: str,
 ) -> str:
@@ -233,30 +202,6 @@ def op_critic_revision(
         _SOUND_BY_CONSTRUCTION,
         _RESTATE,
     ])
-
-
-def op_novelty_branch(
-    idea_text: str,
-    critic_challenge: str,
-    *,
-    accepted: list[SemanticSignature],
-    rejected_summary: str,
-) -> str:
-    avoid = _avoid_block(accepted, rejected_summary)
-    return "\n\n".join(part for part in [
-        (
-            "Use the parent only as intellectual context. Produce a NEW research direction with a "
-            "different causal diagnosis, central intervention, or source of decisive information. "
-            "It must remain meaningful if the parent's core mechanism is removed. Adding modules, "
-            "applications, implementation detail, or safeguards to the parent is not a branch."
-        ),
-        f"COMPLETE PARENT IDEA:\n{idea_text.strip()}",
-        f"NOVELTY-BRANCH CRITIC CHALLENGE:\n{critic_challenge.strip()}",
-        avoid,
-        NON_OBVIOUSNESS_PRESSURE,
-        SOUND_BY_CONSTRUCTION,
-        _RESTATE,
-    ] if part.strip())
 
 
 def op_pivot(accepted: list[SemanticSignature], rejected_summary: str, stuck_on: str) -> str:

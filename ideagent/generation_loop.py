@@ -13,12 +13,12 @@ import json
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from random import Random
 from statistics import mean
 from typing import Any
 
 from ideagent.agent_prompts import IDEATOR_SYSTEM_PROMPT, build_feedback_system_prompt
-from ideagent.agents import CriticAgent, FeedbackAgent, IdeatorAgent, evaluate_soundness_multi
+from ideagent.agents import CriticAgent, IdeatorAgent, QualityAgent, evaluate_soundness_multi
+from ideagent.console import print_candidate_result
 from ideagent.data import (
     build_background_context,
     load_raw_topic_groups,
@@ -32,26 +32,26 @@ from ideagent.experiment_logging import (
     write_run_manifest,
     write_trace_summary,
 )
-from ideagent.novelty_judge import NOVELTY_JUDGE_SYSTEM, NoveltyVerdict, judge_novelty
+from ideagent.diversity_judge import DIVERSITY_JUDGE_SYSTEM, DiversityVerdict, judge_diversity
 from ideagent.quality_eval import SOUNDNESS_EVAL_SYSTEM_PROMPT
 from ideagent.signature import extract_signature, signature_to_final_idea_core
-from ideagent.yield_archive import (
+from ideagent.archive import (
     ACCEPTED, KEEP_ACCEPTED, QUALIFIED_RETIRED, REPAIR_QUEUED, REPAIR_RETAINED,
     REJECT_DUPLICATE, REJECT_EVAL_FAIL, REJECT_UNSOUND, REPLACED,
     Candidate, QualityWeights, RefinementPriorityWeights, RepairPriorityWeights,
-    YieldArchive, YieldThresholds,
+    Archive, Thresholds,
 )
-from ideagent.yield_prompts import (
+from ideagent.prompts import (
     CONSOLIDATION_RESPONSE_FORMAT, CONSOLIDATION_SYSTEM, build_consolidation_user,
     NOVELTY_BRANCH_CRITIC_SYSTEM, RELATIVE_NB_RESPONSE_FORMAT, RELATIVE_NB_SYSTEM,
-    REPAIR_CRITIC_SYSTEM, build_novelty_branch_critic_user, build_relative_nb_user,
-    build_repair_critic_user, op_critic_revision, op_free, op_novelty_branch, op_pivot,
+    REPAIR_CRITIC_SYSTEM, build_relative_nb_user,
+    build_repair_critic_user, op_critic_revision, op_free, op_pivot,
 )
 from ideagent.utils import append_jsonl, create_jsonl, prepare_output_dir, read_jsonl
 
 
 @dataclass
-class YieldConfig:
+class Config:
     input_jsonl: str
     output_dir: str
     max_background_tokens: int | None = None
@@ -205,8 +205,8 @@ class YieldConfig:
         if self.end_topic_idx is not None and self.end_topic_idx <= self.init_topic_idx:
             raise ValueError("end_topic_idx must be > init_topic_idx")
 
-    def thresholds(self) -> YieldThresholds:
-        return YieldThresholds(
+    def thresholds(self) -> Thresholds:
+        return Thresholds(
             soundness_floor=self.soundness_floor,
             soundness_fatal_threshold=self.soundness_fatal_threshold,
             soundness_fatal_min_votes=int(self.soundness_fatal_min_votes),
@@ -287,7 +287,7 @@ def _candidate_metrics(cand: Candidate, weights: QualityWeights) -> dict[str, An
     }
 
 
-def _compact_archive_state(archive: YieldArchive) -> dict[str, Any]:
+def _compact_archive_state(archive: Archive) -> dict[str, Any]:
     return {
         **archive.stats(),
         "search_steps_completed": archive.search_steps_completed,
@@ -337,7 +337,7 @@ def _archive_transition(before: dict[str, Any], after: dict[str, Any]) -> dict[s
 
 
 def _analysis_summary(
-    *, topic_id: str, rows: list[dict[str, Any]], archive: YieldArchive
+    *, topic_id: str, rows: list[dict[str, Any]], archive: Archive
 ) -> dict[str, Any]:
     by_lineage: dict[str, list[dict[str, Any]]] = defaultdict(list)
     by_operator: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -632,10 +632,10 @@ def _analysis_summary(
     }
 
 
-class YieldLoop:
+class GenerationLoop:
     def __init__(
-        self, *, config: YieldConfig, ideator: IdeatorAgent, critic: CriticAgent,
-        feedback: FeedbackAgent,
+        self, *, config: Config, ideator: IdeatorAgent, critic: CriticAgent,
+        quality: QualityAgent,
         steno_client: Any, steno_gen_kwargs: dict[str, Any],
         judge_client: Any, judge_gen_kwargs: dict[str, Any],
         experiment_logger: ExperimentLogger | None = None,
@@ -643,7 +643,7 @@ class YieldLoop:
         self.c = config
         self.ideator = ideator
         self.critic = critic
-        self.feedback = feedback
+        self.quality = quality
         self.steno_client = steno_client
         self.steno_gen_kwargs = steno_gen_kwargs
         self.judge_client = judge_client
@@ -669,12 +669,12 @@ class YieldLoop:
             gen_kwargs=self.steno_gen_kwargs, char_cap=self.c.signature_char_cap,
         )
         set_trace_context(
-            self.feedback.client, topic_id=topic_id, candidate_id=idea_id,
+            self.quality.client, topic_id=topic_id, candidate_id=idea_id,
             search_step=gen, operator=operator, stage="quality_rubrics",
         )
-        self.feedback.reset_for_topic(prior_final_idea_cores=[])
-        self.feedback.set_log_context(topic_id=topic_id, target_paper_id=idea_id)
-        vq = self.feedback.evaluate(prev_critic_turn="", latest_ideator_turn=idea_text, current_final_idea_core=None)
+        self.quality.reset_for_topic(prior_final_idea_cores=[])
+        self.quality.set_log_context(topic_id=topic_id, target_paper_id=idea_id)
+        vq = self.quality.evaluate(prev_critic_turn="", latest_ideator_turn=idea_text, current_final_idea_core=None)
         rubrics = vq.get("rubric_assessment") or []
         scores = _score_map(rubrics)
         feedback_notes = []
@@ -695,11 +695,11 @@ class YieldLoop:
         # prefix actually gets reused across every candidate generated for this topic.
         soundness_cache_key = hashlib.sha256(f"{topic_id}/soundness".encode()).hexdigest()
         set_trace_context(
-            self.feedback.client, topic_id=topic_id, candidate_id=idea_id,
+            self.quality.client, topic_id=topic_id, candidate_id=idea_id,
             search_step=gen, operator=operator, stage="soundness_panel",
         )
         sresults = evaluate_soundness_multi(
-            idea_text, client=self.feedback.client, gen_kwargs=self.feedback.gen_kwargs, n=self.c.soundness_n,
+            idea_text, client=self.quality.client, gen_kwargs=self.quality.gen_kwargs, n=self.c.soundness_n,
             prompt_cache_key=soundness_cache_key,
         )
         ssamples = [r["score"] for r in sresults]
@@ -743,18 +743,18 @@ class YieldLoop:
         )
 
     def _judge(
-        self, cand: Candidate, archive: YieldArchive, *, topic_id: str,
+        self, cand: Candidate, archive: Archive, *, topic_id: str,
         exclude_accepted_id: str | None = None,
         exclude_historical_lineage_id: str | None = None,
-    ) -> NoveltyVerdict:
+    ) -> DiversityVerdict:
         if not cand.eval_ok:
-            return NoveltyVerdict(parsed=False)
+            return DiversityVerdict(parsed=False)
         set_trace_context(
             self.judge_client, topic_id=topic_id, candidate_id=cand.id,
-            search_step=cand.generation, operator=cand.operator, stage="novelty_judgment",
+            search_step=cand.generation, operator=cand.operator, stage="diversity_judgment",
         )
         judge_cache_key = hashlib.sha256(f"{topic_id}/judge".encode()).hexdigest()
-        return judge_novelty(
+        return judge_diversity(
             cand.signature, accepted=archive.accepted_signatures(exclude_id=exclude_accepted_id),
             historical=archive.historical_signatures(
                 exclude_lineage_id=exclude_historical_lineage_id,
@@ -782,19 +782,19 @@ class YieldLoop:
             attempts = 0
             for attempts in range(1, self.c.relative_nb_max_retries + 2):
                 set_trace_context(
-                    self.feedback.client,
+                    self.quality.client,
                     topic_id=topic_id, candidate_id=child.id,
                     search_step=child.generation, operator=child.operator,
                     parent_id=parent.id, lineage_id=parent.lineage_id,
                     stage=f"relative_nb_{orientation}",
                 )
-                raw = self.feedback.client.generate(
+                raw = self.quality.client.generate(
                     [
                         {"role": "system", "content": RELATIVE_NB_SYSTEM},
                         {"role": "user", "content": build_relative_nb_user(idea_a, idea_b)},
                     ],
                     response_format=RELATIVE_NB_RESPONSE_FORMAT,
-                    **self.feedback.gen_kwargs,
+                    **self.quality.gen_kwargs,
                 )
                 start, end = (raw or "").find("{"), (raw or "").rfind("}")
                 if start < 0 or end < start:
@@ -850,14 +850,6 @@ class YieldLoop:
             "judgments": judgments,
         }
 
-    def _ranking_weights(self, archive: YieldArchive) -> QualityWeights:
-        legacy_target = self.c.accepted_target or self.c.accepted_capacity
-        return (
-            self.c.late_weights()
-            if archive.yield_count() >= legacy_target
-            else self.c.early_weights()
-        )
-
     def _weights_for_seed(self, seed_index: int) -> QualityWeights:
         """Use the preregistered early/late Q schedule without an archive-size target."""
 
@@ -906,122 +898,9 @@ class YieldLoop:
             if not note.lstrip().lower().startswith("feasibility=")
         ]
 
-    def _action_decision(self, step: int, archive: YieldArchive, rng: Random) -> dict[str, Any]:
-        legacy_target = self.c.accepted_target or self.c.accepted_capacity
-        if step <= self.c.forced_exploration_steps:
-            return {
-                "step": step,
-                "forced_exploration": True,
-                "target_reached": archive.yield_count() >= legacy_target,
-                "raw_weights": {
-                    "free": 1.0, "repair": 0.0,
-                    "novelty_branch": 0.0, "accepted_refine": 0.0,
-                },
-                "availability": {
-                    "free": True,
-                    "repair": bool(archive.repair_archive),
-                    "novelty_branch": False,
-                    "accepted_refine": False,
-                },
-                "effective_probabilities": {"free": 1.0},
-                "random_draw": None,
-                "chosen_action": "free",
-            }
-
-        target_reached = archive.yield_count() >= legacy_target
-        if target_reached:
-            raw = {
-                "free": self.c.after_full_free,
-                "repair": self.c.after_full_repair,
-                "novelty_branch": self.c.after_full_novelty_branch,
-                "accepted_refine": self.c.after_full_accepted_refine,
-            }
-        else:
-            raw = {
-                "free": self.c.before_full_free,
-                "repair": self.c.before_full_repair,
-                "novelty_branch": self.c.before_full_novelty_branch,
-                "accepted_refine": self.c.before_full_accepted_refine,
-            }
-
-        weights = self._ranking_weights(archive)
-        available = {
-            "free": True,
-            "repair": archive.select_repair(self.c.thresholds(), weights) is not None,
-            "novelty_branch": (
-                archive.select_accepted_for_novelty_branch(self.c.novelty_branch_limit)
-                is not None
-            ),
-            "accepted_refine": (
-                target_reached and archive.select_accepted_for_refinement(weights) is not None
-            ),
-        }
-        adjusted = dict(raw)
-        redistribution: dict[str, Any] = {}
-
-        def move_to_discovery(action: str, *, branch_fraction: float) -> None:
-            mass = adjusted.get(action, 0.0)
-            if mass <= 0 or available.get(action, False):
-                return
-            adjusted[action] = 0.0
-            if available.get("novelty_branch", False):
-                to_branch = mass * branch_fraction
-                adjusted["novelty_branch"] += to_branch
-                adjusted["free"] += mass - to_branch
-                redistribution[action] = {
-                    "mass": mass, "to_novelty_branch": to_branch,
-                    "to_free": mass - to_branch,
-                }
-            else:
-                adjusted["free"] += mass
-                redistribution[action] = {"mass": mass, "to_free": mass}
-
-        # Empty repair capacity must not silently turn a discovery budget into polishing.
-        move_to_discovery(
-            "repair", branch_fraction=self.c.repair_fallback_branch_fraction
-        )
-        # If a branch/polish pool is exhausted, return its mass to discovery as well.
-        move_to_discovery("novelty_branch", branch_fraction=0.0)
-        move_to_discovery("accepted_refine", branch_fraction=0.70)
-
-        choices = [
-            (name, weight)
-            for name, weight in adjusted.items()
-            if available[name] and weight > 0
-        ]
-        if not choices:
-            return {
-                "step": step, "forced_exploration": False,
-                "target_reached": target_reached, "raw_weights": raw,
-                "availability": available, "redistribution": redistribution,
-                "adjusted_weights": adjusted,
-                "effective_probabilities": {"free": 1.0},
-                "random_draw": None, "chosen_action": "free",
-            }
-        total = sum(weight for _, weight in choices)
-        draw = rng.random() * total
-        effective = {name: weight / total for name, weight in choices}
-        cumulative = 0.0
-        chosen = choices[-1][0]
-        for name, weight in choices:
-            cumulative += weight
-            if draw <= cumulative:
-                chosen = name
-                break
-        return {
-            "step": step, "forced_exploration": False,
-            "target_reached": target_reached, "raw_weights": raw,
-            "availability": available, "redistribution": redistribution,
-            "adjusted_weights": adjusted, "effective_probabilities": effective,
-            "random_draw": draw, "draw_total": total, "chosen_action": chosen,
-        }
-
-    def _choose_action(self, step: int, archive: YieldArchive, rng: Random) -> str:
-        return str(self._action_decision(step, archive, rng)["chosen_action"])
-
     def _fresh_directive(
-        self, last_outcome: str | None, last_verdict: NoveltyVerdict | None,
-        archive: YieldArchive,
+        self, last_outcome: str | None, last_verdict: DiversityVerdict | None,
+        archive: Archive,
     ) -> tuple[str, str]:
         acc, rej = archive.accepted_signatures(), archive.generation_memory_summary()
         if last_outcome == REJECT_DUPLICATE:
@@ -1031,7 +910,7 @@ class YieldLoop:
             return "pivot", op_pivot(acc, rej, last_verdict.rejected_family or "a known-bad family")
         return "free", op_free(acc, rej)
 
-    def _maybe_consolidate(self, archive: YieldArchive) -> None:
+    def _maybe_consolidate(self, archive: Archive) -> None:
         if not archive.needs_consolidation(self.c.consolidate_every):
             return
         user = build_consolidation_user(archive.rejected_families_summary, archive.rejected_pending)
@@ -1052,7 +931,7 @@ class YieldLoop:
 
     @staticmethod
     def _write_candidate(
-        cand_log: Any, cand: Candidate, verdict: NoveltyVerdict, outcome: str,
+        cand_log: Any, cand: Candidate, verdict: DiversityVerdict, outcome: str,
         *, weights: QualityWeights, critic_challenge: str = "",
         parent_selection_priority: float | None = None,
         parent: Candidate | None = None,
@@ -1062,7 +941,7 @@ class YieldLoop:
         memory_before: dict[str, Any] | None = None,
         archive_before: dict[str, Any] | None = None,
         archive_after: dict[str, Any] | None = None,
-        thresholds: YieldThresholds | None = None,
+        thresholds: Thresholds | None = None,
     ) -> dict[str, Any]:
         metrics = _candidate_metrics(cand, weights)
         parent_metrics = _candidate_metrics(parent, weights) if parent is not None else None
@@ -1174,7 +1053,7 @@ class YieldLoop:
             "archive_transition": _archive_transition(before, after),
             "thresholds": asdict(thresholds) if thresholds is not None else {},
             "parent_full_record": (
-                YieldArchive._candidate_json(parent, include_text=True)
+                Archive._candidate_json(parent, include_text=True)
                 if parent is not None else None
             ),
             "signature": cand.signature.to_json(), "idea_text": cand.idea_text,
@@ -1184,20 +1063,24 @@ class YieldLoop:
         return row
 
     @staticmethod
-    def _print_candidate(cand: Candidate, verdict: NoveltyVerdict, outcome: str,
-                         archive: YieldArchive) -> None:
+    def _print_candidate(cand: Candidate, verdict: DiversityVerdict, outcome: str,
+                         archive: Archive) -> None:
         step = f"g{cand.generation:03d}" + (f".r{cand.revision}" if cand.revision else "")
-        print(
-            f"[{step}] {cand.operator:<13} nb={cand.non_obviousness:>3} "
-            f"cl={cand.mechanism_clarity:>3} snd={cand.soundness_100:5.1f} "
-            f"div={verdict.diversity_score:>3} -> {outcome:<16} "
-            f"ACTIVE={archive.yield_count()} DISC={archive.discovery_yield()} "
-            f"(repair={len(archive.repair_archive)})",
-            flush=True,
+        print_candidate_result(
+            step=step,
+            operator=cand.operator,
+            non_obviousness=cand.non_obviousness,
+            clarity=cand.mechanism_clarity,
+            soundness=cand.soundness_100,
+            diversity_score=verdict.diversity_score,
+            outcome=outcome,
+            active_yield=archive.yield_count(),
+            discovery_yield=archive.discovery_yield(),
+            repair_archive_size=len(archive.repair_archive),
         )
 
-    def run_topic(self, *, topic_id: str, background: str, out_dir: Path) -> YieldArchive:
-        archive = YieldArchive(
+    def run_topic(self, *, topic_id: str, background: str, out_dir: Path) -> Archive:
+        archive = Archive(
             accepted_capacity=self.c.accepted_capacity,
             repair_capacity=self.c.repair_capacity,
             repair_attempt_limit=self.c.repair_attempt_limit,
@@ -1214,7 +1097,7 @@ class YieldLoop:
         analysis_path = out_dir / f"analysis_{topic_id}.json"
 
         last_outcome: str | None = None
-        last_verdict: NoveltyVerdict | None = None
+        last_verdict: DiversityVerdict | None = None
         action_counts = {
             "free": 0, "pivot": 0, "repair": 0,
             "novelty_branch": 0, "accepted_refine": 0,
@@ -1340,57 +1223,6 @@ class YieldLoop:
                         repair_attempts = parent.repair_attempts + 1
                         accepted_refinements_used = 0
                         auxiliary_attempts_used = parent.auxiliary_attempts_used + 1
-                elif action == "novelty_branch":
-                    parent = archive.select_accepted_for_novelty_branch(
-                        self.c.novelty_branch_limit
-                    )
-                    if parent is None:
-                        operator, directive = self._fresh_directive(
-                            last_outcome, last_verdict, archive,
-                        )
-                        action_counts[operator] += 1
-                        lineage_id = idea_id
-                        revision = repair_attempts = accepted_refinements_used = 0
-                        auxiliary_attempts_used = 0
-                    else:
-                        parent.novelty_branches_used += 1
-                        parent_selection_priority = (
-                            0.7 * parent.non_obviousness / 100.0
-                            + 0.3 * parent.diversity_score / 100.0
-                        )
-                        operator = "novelty_branch"
-                        action_counts[operator] += 1
-                        set_trace_context(
-                            getattr(self.critic, "client", None),
-                            topic_id=topic_id, candidate_id=idea_id,
-                            search_step=step, operator=operator, parent_id=parent.id,
-                            lineage_id=idea_id, stage="focused_novelty_branch_critic",
-                        )
-                        self.critic.set_log_context(
-                            topic_id=topic_id, target_paper_id=idea_id
-                        )
-                        critic_challenge = self.critic.focused_review(
-                            system_prompt=NOVELTY_BRANCH_CRITIC_SYSTEM,
-                            user_prompt=build_novelty_branch_critic_user(
-                                parent.idea_text,
-                                feedback_notes=parent.feedback_notes,
-                                accepted=(
-                                    archive.accepted_signatures()
-                                    + archive.historical_signatures()
-                                ),
-                            ),
-                        )
-                        directive = op_novelty_branch(
-                            parent.idea_text,
-                            critic_challenge,
-                            accepted=archive.accepted_signatures(),
-                            rejected_summary=archive.generation_memory_summary(),
-                        )
-                        # This is a parent-conditioned exploration call, not another version of
-                        # the parent's mechanism. Diversity is checked against the parent below.
-                        lineage_id = idea_id
-                        revision = repair_attempts = accepted_refinements_used = 0
-                        auxiliary_attempts_used = 0
                 else:  # accepted_refine = same-lineage accepted polishing
                     parent = archive.accepted.get(str(requested_parent_id))
                     if parent is None and requested_lineage_id is not None:
@@ -1623,7 +1455,7 @@ class YieldLoop:
         representative_path = out_dir / f"lineage_representatives_{topic_id}.jsonl"
         with representative_path.open("w", encoding="utf-8") as handle:
             for representative in self.last_lineage_representatives:
-                payload = YieldArchive._candidate_json(representative, include_text=True)
+                payload = Archive._candidate_json(representative, include_text=True)
                 accepted_version_ids = [
                     candidate.id for candidate in archive.accepted_version_pool.values()
                     if candidate.lineage_id == representative.lineage_id
@@ -1711,9 +1543,9 @@ def _placeholder_sig(idea_id: str):
     return SemanticSignature(id=idea_id, problem="", core_mechanism="", novel_move="", key_assumption="", expected_effect="")
 
 
-def run_yield_search(
-    *, config: YieldConfig, ideator: IdeatorAgent, critic: CriticAgent,
-    feedback: FeedbackAgent,
+def run_search(
+    *, config: Config, ideator: IdeatorAgent, critic: CriticAgent,
+    quality: QualityAgent,
     steno_client: Any, steno_gen_kwargs: dict[str, Any],
     judge_client: Any, judge_gen_kwargs: dict[str, Any],
     experiment_logger: ExperimentLogger | None = None,
@@ -1724,7 +1556,7 @@ def run_yield_search(
         models = {
             "ideator": getattr(ideator.client, "model_id", ""),
             "critic": getattr(critic.client, "model_id", ""),
-            "feedback_and_soundness": getattr(feedback.client, "model_id", ""),
+            "feedback_and_soundness": getattr(quality.client, "model_id", ""),
             "steno": getattr(steno_client, "model_id", ""),
             "judge": getattr(judge_client, "model_id", ""),
         }
@@ -1750,7 +1582,7 @@ def run_yield_search(
             "posthoc_evaluation_field": "items[].idea_text",
             "treatment": [
                 "selective evaluator-informed compact memory",
-                "quality and novelty gates",
+                "quality and diversity gates",
                 "immediate repair critic and bounded same-lineage repair",
                 "immediate accepted-idea same-mechanism polishing against soft aspiration targets",
                 "one shared per-seed auxiliary allowance across repair and accepted polishing",
@@ -1763,7 +1595,7 @@ def run_yield_search(
                 "probabilistic action scheduler", "novelty branching",
             ],
             "evaluation_order": (
-                "signature, rubric evaluation, all soundness samples, then novelty judgment; "
+                "signature, rubric evaluation, all soundness samples, then diversity judgment; "
                 "no staged early rejection; relative non-obviousness comparison is run only for "
                 "an otherwise replacement-eligible accepted refinement"
             ),
@@ -1776,7 +1608,7 @@ def run_yield_search(
             "sampling": {
                 "ideator": getattr(ideator, "gen_kwargs", {}),
                 "critic": getattr(critic, "gen_kwargs", {}),
-                "feedback_and_soundness": getattr(feedback, "gen_kwargs", {}),
+                "feedback_and_soundness": getattr(quality, "gen_kwargs", {}),
                 "steno": steno_gen_kwargs,
                 "judge": judge_gen_kwargs,
             },
@@ -1785,7 +1617,7 @@ def run_yield_search(
                 "ideator_system_prompt_sha256": text_sha256(IDEATOR_SYSTEM_PROMPT),
                 "feedback_system_prompt_no_prior": build_feedback_system_prompt([]),
                 "soundness_system_prompt": SOUNDNESS_EVAL_SYSTEM_PROMPT,
-                "novelty_judge_system_prompt": NOVELTY_JUDGE_SYSTEM,
+                "diversity_judge_system_prompt": DIVERSITY_JUDGE_SYSTEM,
                 "repair_critic_system_prompt": REPAIR_CRITIC_SYSTEM,
                 "novelty_branch_critic_system_prompt": NOVELTY_BRANCH_CRITIC_SYSTEM,
                 "relative_nb_system_prompt": RELATIVE_NB_SYSTEM,
@@ -1799,7 +1631,7 @@ def run_yield_search(
                     "a focused critique; novelty branches create new lineages"
                 ),
                 "disk": (
-                    "every full candidate, parent, prompt, output, rubric, soundness sample, novelty "
+                    "every full candidate, parent, prompt, output, rubric, soundness sample, diversity "
                     "verdict, scheduler draw, memory state, archive transition, and archive snapshot"
                 ),
             },
@@ -1817,8 +1649,8 @@ def run_yield_search(
     _tag = f"_from{config.init_topic_idx}" if config.init_topic_idx else ""
     final_idea_cores_path = out_dir / f"final_idea_cores{_tag}.jsonl"
 
-    loop = YieldLoop(
-        config=config, ideator=ideator, critic=critic, feedback=feedback,
+    loop = GenerationLoop(
+        config=config, ideator=ideator, critic=critic, quality=quality,
         steno_client=steno_client, steno_gen_kwargs=steno_gen_kwargs,
         judge_client=judge_client, judge_gen_kwargs=judge_gen_kwargs,
         experiment_logger=experiment_logger,

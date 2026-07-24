@@ -11,7 +11,7 @@ from dataclasses import asdict, dataclass, field
 from math import isclose
 from typing import Any
 
-from ideagent.novelty_judge import NoveltyVerdict
+from ideagent.diversity_judge import DiversityVerdict
 from ideagent.signature import SemanticSignature
 
 ACCEPTED = "accepted"
@@ -89,7 +89,7 @@ DEFAULT_REFINEMENT_PRIORITY = RefinementPriorityWeights()
 
 
 @dataclass
-class YieldThresholds:
+class Thresholds:
     soundness_floor: float = 60.0
     soundness_fatal_threshold: int = 3
     soundness_fatal_min_votes: int = 3
@@ -138,11 +138,6 @@ class Candidate:
         if not self.lineage_id:
             self.lineage_id = self.id
 
-    @property
-    def quality_key(self) -> tuple[int, int, float]:
-        """Legacy/debug ordering only; archive decisions use weighted_quality()."""
-        return (self.non_obviousness, self.mechanism_clarity, self.soundness_100)
-
     def weighted_quality(self, weights: QualityWeights) -> float:
         return (
             weights.non_obviousness * self.non_obviousness
@@ -158,20 +153,20 @@ class Candidate:
             return own_q > other_q
         return self.feasibility > other.feasibility
 
-    def passes_soundness(self, t: YieldThresholds) -> bool:
+    def passes_soundness(self, t: Thresholds) -> bool:
         return (
             self.soundness_100 >= t.soundness_floor
             and not self.soundness_fatal
             and not self.soundness_disputed
         )
 
-    def passes_quality(self, t: YieldThresholds) -> bool:
+    def passes_quality(self, t: Thresholds) -> bool:
         return self.non_obviousness >= t.nb_min and self.mechanism_clarity >= t.clarity_min
 
-    def passes_all(self, t: YieldThresholds) -> bool:
+    def passes_all(self, t: Thresholds) -> bool:
         return self.passes_soundness(t) and self.passes_quality(t)
 
-    def near_thresholds(self, t: YieldThresholds) -> bool:
+    def near_thresholds(self, t: Thresholds) -> bool:
         # Any non-consensus severe objection deserves its immediate bounded repair chain,
         # even when the panel mean is farther than the ordinary numeric margin.
         sound_near = (
@@ -184,7 +179,7 @@ class Candidate:
         )
         return not self.passes_all(t) and not self.soundness_fatal and sound_near and quality_near
 
-    def defect_text(self, t: YieldThresholds) -> str:
+    def defect_text(self, t: Thresholds) -> str:
         defects: list[str] = []
         if self.soundness_fatal:
             defects.append(
@@ -211,16 +206,8 @@ class Candidate:
             defects.append(f"mechanism clarity {self.mechanism_clarity}<{t.clarity_min}")
         return "; ".join(defects)
 
-    def max_gate_deficit(self, t: YieldThresholds) -> float:
-        return max(
-            0.0,
-            t.soundness_floor - self.soundness_100,
-            float(t.nb_min - self.non_obviousness),
-            float(t.clarity_min - self.mechanism_clarity),
-        )
-
     def repair_priority(
-        self, t: YieldThresholds, attempt_limit: int,
+        self, t: Thresholds, attempt_limit: int,
         policy: RepairPriorityWeights = DEFAULT_REPAIR_PRIORITY,
     ) -> float:
         """Upside score for choosing one mechanism from the repair archive."""
@@ -261,7 +248,7 @@ class Candidate:
         )
 
 
-class YieldArchive:
+class Archive:
     def __init__(
         self, *, accepted_capacity: int = 10, repair_capacity: int = 10,
         repair_attempt_limit: int = 1, accepted_refinement_limit: int = 2,
@@ -367,53 +354,6 @@ class YieldArchive:
             )
         return "\n".join(parts)
 
-    def select_repair(self, t: YieldThresholds, weights: QualityWeights) -> Candidate | None:
-        if not self.repair_archive:
-            return None
-        return max(
-            self.repair_archive,
-            key=lambda c: (
-                c.repair_priority(t, self.repair_attempt_limit, self.repair_priority_weights),
-                c.weighted_quality(weights),
-                -c.generation,
-            ),
-        )
-
-    def select_accepted_for_refinement(self, weights: QualityWeights) -> Candidate | None:
-        eligible = [
-            c for c in self.accepted.values()
-            if c.accepted_refinements_used < self.accepted_refinement_limit
-        ]
-        if not eligible:
-            return None
-        return max(
-            eligible,
-            key=lambda c: (
-                c.refinement_priority(
-                    self.accepted_refinement_limit, self.refinement_priority_weights,
-                ),
-                c.weighted_quality(weights),
-                -c.generation,
-            ),
-        )
-
-    def select_accepted_for_novelty_branch(self, branch_limit: int) -> Candidate | None:
-        eligible = [
-            candidate for candidate in self.accepted.values()
-            if candidate.novelty_branches_used < branch_limit
-        ]
-        if not eligible:
-            return None
-        return max(
-            eligible,
-            key=lambda candidate: (
-                candidate.non_obviousness,
-                candidate.diversity_score,
-                -candidate.novelty_branches_used,
-                -candidate.generation,
-            ),
-        )
-
     # ── compact memory writes ──────────────────────────────────────────────────────────
     def _record_memory(self, cand: Candidate, note: str) -> None:
         self.rejected_pending.append(f"{cand.signature.compact()} :: {note}")
@@ -477,7 +417,7 @@ class YieldArchive:
             "rubric_assessment": cand.rubric_assessment,
         })
 
-    def _has_foreign_historical_duplicate(self, verdict: NoveltyVerdict) -> bool:
+    def _has_foreign_historical_duplicate(self, verdict: DiversityVerdict) -> bool:
         """True unless every historical match belongs to an actively matched lineage."""
         if not verdict.historical_duplicate_ids:
             return False
@@ -491,7 +431,7 @@ class YieldArchive:
             for hid in verdict.historical_duplicate_ids
         )
 
-    def _push_repair(self, cand: Candidate, t: YieldThresholds, weights: QualityWeights) -> None:
+    def _push_repair(self, cand: Candidate, t: Thresholds, weights: QualityWeights) -> None:
         self.repair_archive = [c for c in self.repair_archive if c.lineage_id != cand.lineage_id]
         self.repair_archive.append(cand)
         if len(self.repair_archive) > self.repair_capacity:
@@ -524,7 +464,7 @@ class YieldArchive:
 
     # ── admission ──────────────────────────────────────────────────────────────────────
     def consider(
-        self, cand: Candidate, verdict: NoveltyVerdict, t: YieldThresholds,
+        self, cand: Candidate, verdict: DiversityVerdict, t: Thresholds,
         weights: QualityWeights = EARLY_WEIGHTS, *, repair_parent: Candidate | None = None,
     ) -> str:
         cand.diversity_score = verdict.diversity_score
@@ -644,8 +584,8 @@ class YieldArchive:
         return REJECT_UNSOUND
 
     def consider_accepted_refinement(
-        self, cand: Candidate, *, parent_id: str, verdict: NoveltyVerdict,
-        t: YieldThresholds, weights: QualityWeights, nb_not_worse: bool = True,
+        self, cand: Candidate, *, parent_id: str, verdict: DiversityVerdict,
+        t: Thresholds, weights: QualityWeights, nb_not_worse: bool = True,
     ) -> str:
         parent = self.accepted.get(parent_id)
         if parent is None:

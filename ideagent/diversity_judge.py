@@ -1,4 +1,4 @@
-"""Batched structured novelty judgment over active and historical qualified mechanisms."""
+"""Batched structured diversity judgment over active and historical qualified mechanisms."""
 from __future__ import annotations
 
 import json
@@ -8,8 +8,8 @@ from typing import Any
 
 from ideagent.signature import SemanticSignature
 
-NOVELTY_JUDGE_SYSTEM = (
-    "You are a strict novelty judge for a research-idea archive. Compare the CANDIDATE idea "
+DIVERSITY_JUDGE_SYSTEM = (
+    "You are a strict diversity judge for a research-idea archive. Compare the CANDIDATE idea "
     "against (1) ACTIVE ACCEPTED ideas, (2) HISTORICAL QUALIFIED mechanisms that previously "
     "passed every gate but left the active store, and (3) REJECTED memory. Judge by substance -- "
     "the problem attacked and core mechanism -- not surface wording.\n\n"
@@ -26,7 +26,7 @@ def _response_format() -> dict[str, Any]:
     return {
         "type": "json_schema",
         "json_schema": {
-            "name": "novelty_verdict",
+            "name": "diversity_verdict",
             "schema": {
                 "type": "object",
                 "properties": {
@@ -63,7 +63,7 @@ def _response_format() -> dict[str, Any]:
 
 
 @dataclass
-class NoveltyVerdict:
+class DiversityVerdict:
     parsed: bool
     diversity_score: int = 0
     duplicate_ids: list[str] = field(default_factory=list)
@@ -87,7 +87,7 @@ def _first_json(raw: str) -> dict[str, Any] | None:
         return None
 
 
-def judge_novelty(
+def judge_diversity(
     candidate: SemanticSignature,
     *,
     accepted: list[SemanticSignature],
@@ -97,7 +97,7 @@ def judge_novelty(
     client: Any,
     gen_kwargs: dict[str, Any],
     prompt_cache_key: str | None = None,
-) -> NoveltyVerdict:
+) -> DiversityVerdict:
     """One batched call. With an empty archive there is nothing to compare against -> fully novel.
 
     prompt_cache_key should be constant for the whole topic (e.g. f"{topic_id}/judge"). Note
@@ -105,7 +105,7 @@ def judge_novelty(
     static system prompt actually benefits from caching here -- still worth a consistent key
     since it costs nothing and every call shares that system message."""
     if not accepted and not historical and not rejected_summary.strip():
-        return NoveltyVerdict(parsed=True, diversity_score=100)
+        return DiversityVerdict(parsed=True, diversity_score=100)
 
     accepted_block = "\n".join(s.compact() for s in accepted) or "(none yet)"
     historical_block = (
@@ -119,7 +119,7 @@ def judge_novelty(
         "HISTORICAL QUALIFIED MECHANISMS (previously counted; never new again):\n"
         f"{historical_block}\n\n"
         f"REJECTED MEMORY (known-bad families / duplicate patterns / fatal flaws):\n{rejected_block}\n\n"
-        "Return the structured novelty verdict. Only use ids from ACCEPTED IDEAS in duplicate_ids. "
+        "Return the structured diversity verdict. Only use ids from ACCEPTED IDEAS in duplicate_ids. "
         "Only use ids from HISTORICAL QUALIFIED MECHANISMS in historical_duplicate_ids."
     )
     call_kwargs = dict(gen_kwargs)
@@ -127,13 +127,13 @@ def judge_novelty(
         call_kwargs["prompt_cache_key"] = prompt_cache_key
     obj = _first_json(
         client.generate(
-            [{"role": "system", "content": NOVELTY_JUDGE_SYSTEM}, {"role": "user", "content": user}],
+            [{"role": "system", "content": DIVERSITY_JUDGE_SYSTEM}, {"role": "user", "content": user}],
             response_format=_response_format(),
             **call_kwargs,
         )
     )
     if obj is None:
-        return NoveltyVerdict(parsed=False)  # fail closed
+        return DiversityVerdict(parsed=False)  # fail closed
     try:
         score = int(obj["diversity_score"])
         raw_dup = obj["duplicate_ids"]
@@ -153,7 +153,7 @@ def judge_novelty(
         historical_ids = {s.id for s in historical}
         dup = [str(i) for i in raw_dup if str(i) in accepted_ids]
         historical_dup = [str(i) for i in raw_historical_dup if str(i) in historical_ids]
-        return NoveltyVerdict(
+        return DiversityVerdict(
             parsed=True,
             diversity_score=max(0, min(100, score)),
             duplicate_ids=dup,
@@ -163,4 +163,4 @@ def judge_novelty(
             closest=raw_closest,
         )
     except (KeyError, TypeError, ValueError):
-        return NoveltyVerdict(parsed=False)
+        return DiversityVerdict(parsed=False)

@@ -105,7 +105,7 @@ agents:
     thinking_effort: high
     max_new_tokens: 4096
 
-  feedback:
+  quality:
     # scores non-obviousness + mechanism clarity, and hosts the soundness panel
     model_id: gemini-3.1-pro-preview
     api_key_env: GEMINI_API_KEY

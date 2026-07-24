@@ -54,7 +54,7 @@ from ideagent.sequential_memory_baseline import _fallback_core
 from ideagent.signature import extract_signature, signature_to_final_idea_core
 from ideagent.single_shot_baseline import single_shot_response_format
 from ideagent.utils import append_jsonl, create_jsonl, prepare_output_dir, read_jsonl
-from ideagent.yield_prompts import (
+from ideagent.prompts import (
     NON_OBVIOUSNESS_PRESSURE,
     SOUND_BY_CONSTRUCTION,
     op_free_baseline,

@@ -1,10 +1,10 @@
-"""Entry point for the Yield novelty-archive search.
+"""Entry point for the IDEAgent search.
 
-    python scripts/run_yield_archive.py --config configs/ideagent.yaml
+    python scripts/run_ideagent.py --config configs/ideagent.yaml
 
-Roles: ideator (generates), critic (focuses repairs/refinements), feedback (scores
+Roles: ideator (generates), critic (focuses repairs/refinements), quality (scores
 non-obviousness/clarity/feasibility and hosts the soundness panel), steno (extracts compact
-signatures), judge (batched novelty judgment + consolidation).
+signatures), judge (batched diversity judgment + consolidation).
 """
 from __future__ import annotations
 
@@ -16,14 +16,14 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from ideagent.agents import CriticAgent, FeedbackAgent, IdeatorAgent
+from ideagent.agents import CriticAgent, IdeatorAgent, QualityAgent
 from ideagent.clients import build_client
 from ideagent.experiment_logging import ExperimentLogger, TracedClient
 from ideagent.response_logging import AsyncResponseLogger
 from ideagent.utils import load_config
-from ideagent.yield_loop import YieldConfig, run_yield_search
+from ideagent.generation_loop import Config, run_search
 
-ROLES = ("ideator", "critic", "feedback", "steno", "judge")
+ROLES = ("ideator", "critic", "quality", "steno", "judge")
 
 
 def _sampling(a: dict) -> dict:
@@ -49,7 +49,7 @@ def main() -> None:
     except ModuleNotFoundError:
         pass
 
-    parser = argparse.ArgumentParser(description="Yield novelty-archive ideation search.")
+    parser = argparse.ArgumentParser(description="IDEAgent ideation search.")
     parser.add_argument("--config", type=Path, default=Path("configs/ideagent.yaml"))
     args = parser.parse_args()
 
@@ -81,7 +81,7 @@ def main() -> None:
     for role in ROLES:
         print(f"  {role:<9}: {models[role]}")
 
-    config = YieldConfig(
+    config = Config(
         input_jsonl=data["input_jsonl"], output_dir=data["output_dir"],
         max_background_tokens=_opt_int(run.get("max_background_tokens")),
         resume=bool(run.get("resume", False)),
@@ -148,12 +148,12 @@ def main() -> None:
                            response_logger=response_logger, conv_sliding_window=None)
     critic = CriticAgent(role="critic", client=clients["critic"], gen_kwargs=gen_kwargs["critic"],
                          response_logger=response_logger, conv_sliding_window=None)
-    feedback = FeedbackAgent(role="feedback", client=clients["feedback"], gen_kwargs=gen_kwargs["feedback"],
-                             response_logger=response_logger, conv_sliding_window=None, single_turn=True)
+    quality = QualityAgent(role="quality", client=clients["quality"], gen_kwargs=gen_kwargs["quality"],
+                           response_logger=response_logger, conv_sliding_window=None, single_turn=True)
 
     with response_logger:
-        run_yield_search(
-            config=config, ideator=ideator, critic=critic, feedback=feedback,
+        run_search(
+            config=config, ideator=ideator, critic=critic, quality=quality,
             steno_client=clients["steno"], steno_gen_kwargs=gen_kwargs["steno"],
             judge_client=clients["judge"], judge_gen_kwargs=gen_kwargs["judge"],
             experiment_logger=trace_logger,

@@ -2,11 +2,14 @@
 """Collapse an evaluated agentic version pool to one representative per fresh seed.
 
 The input pool is evaluated *before* this step, so every accepted parent and accepted child has
-external quality scores and cross-lineage diversity judgments. Within each seed, accepted
-versions are the eligible alternatives; the seed's logged fallback is used only when no version
-ever passed the internal acceptance gates. The output contains exactly one item per fresh seed
-and reindexed quality/diversity reports, so downstream Top-5 evaluation sees the same N as the
+external quality scores and cross-lineage diversity judgments. The output contains reindexed
+ideas/quality/diversity reports, so downstream evaluation sees the same N as the
 sequential-memory baseline without counting parent and child as separate discoveries.
+
+--use-final-accepted-ideas (default: true): use exactly the ideas active in the accepted
+archive at the end of search for each topic, no re-selection. Pass
+--no-use-final-accepted-ideas to instead pick the best representative per seed from the full
+parent/child pool using the external quality/diversity scores.
 """
 from __future__ import annotations
 
@@ -23,6 +26,7 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+from ideagent.console import print_warning
 from ideagent.diversity_eval import (
     AxisAssessment,
     PairwiseScore,
@@ -116,120 +120,29 @@ def _selection_objective(
     )
 
 
-def select_topic(
-    ideas_record: dict[str, Any],
+def _finalize_selection(
+    *,
+    topic_id: str,
+    items: list[dict[str, Any]],
     diversity_record: dict[str, Any],
     quality_record: dict[str, Any],
-    *,
-    nb_min: int = 6,
-    soundness_min: int = 6,
-    clarity_min: int = 6,
-    diversity_min: int = 6,
+    best_selection: tuple[int, ...],
+    n_pool: int,
+    generation_mode: str,
+    lineage_selection: dict[str, Any] | None,
+    per_item_metadata: dict[int, dict[str, Any]],
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
-    topic_id = str(ideas_record["topic_id"])
-    if str(diversity_record.get("topic_id")) != topic_id:
-        raise ValueError(f"{topic_id}: diversity topic mismatch")
-    if str(quality_record.get("topic_id")) != topic_id:
-        raise ValueError(f"{topic_id}: quality topic mismatch")
-
-    items = ideas_record.get("items")
-    if not isinstance(items, list) or not items:
-        raise ValueError(f"{topic_id}: lineage pool has no items")
-    n_pool = len(items)
-    if int(diversity_record.get("n_ideas", -1)) != n_pool:
-        raise ValueError(f"{topic_id}: diversity report does not cover the full version pool")
-    if int(quality_record.get("n_ideas", -1)) != n_pool:
-        raise ValueError(f"{topic_id}: quality report does not cover the full version pool")
-
-    quality = _quality_by_idea(quality_record)
-    required = {
-        "nonobviousness", "soundness", "mechanism_clarity_specificity", "feasibility",
-        "significance",
-    }
-    for idx in range(n_pool):
-        if not required.issubset(quality.get(idx, {})):
-            raise ValueError(f"{topic_id}: incomplete external quality scores for idea {idx}")
-
-    grouped: dict[int, list[int]] = {}
-    for idx, item in enumerate(items):
-        metadata = item.get("source_metadata")
-        if not isinstance(metadata, dict) or metadata.get("seed_index") is None:
-            raise ValueError(f"{topic_id}: idea {idx} has no source_metadata.seed_index")
-        grouped.setdefault(int(metadata["seed_index"]), []).append(idx)
-
-    expected = int(
-        ideas_record.get("fresh_seed_budget")
-        or ideas_record.get("n_seed_slots")
-        or len(grouped)
-    )
-    seed_indices = sorted(grouped)
-    if seed_indices != list(range(1, expected + 1)):
-        raise ValueError(
-            f"{topic_id}: expected seed groups 1..{expected}, got {seed_indices}"
-        )
-
-    options: list[list[int]] = []
-    option_basis: dict[int, str] = {}
-    for seed_index in seed_indices:
-        accepted = [
-            idx for idx in grouped[seed_index]
-            if bool((items[idx].get("source_metadata") or {}).get("accepted_version"))
-        ]
-        if accepted:
-            options.append(accepted)
-            option_basis[seed_index] = "all_accepted_parent_child_versions"
-        else:
-            fallbacks = [
-                idx for idx in grouped[seed_index]
-                if bool(
-                    (items[idx].get("source_metadata") or {}).get(
-                        "primary_seed_representative"
-                    )
-                )
-            ]
-            if len(fallbacks) != 1:
-                raise ValueError(
-                    f"{topic_id}: seed {seed_index} needs exactly one non-accepted fallback"
-                )
-            options.append(fallbacks)
-            option_basis[seed_index] = "nonaccepted_seed_fallback"
-
-    pair_lookup = pair_score_lookup(diversity_record.get("pairwise_scores", []))
-    for left, right in itertools.combinations(range(n_pool), 2):
-        if (left, right) not in pair_lookup:
-            raise ValueError(f"{topic_id}: missing diversity pair ({left}, {right})")
-
-    best_selection: tuple[int, ...] | None = None
-    best_objective: tuple[Any, ...] | None = None
-    combinations_considered = 0
-    for selection in itertools.product(*options):
-        combinations_considered += 1
-        objective = _selection_objective(
-            selection,
-            quality=quality,
-            pair_lookup=pair_lookup,
-            nb_min=nb_min,
-            soundness_min=soundness_min,
-            clarity_min=clarity_min,
-            diversity_min=diversity_min,
-        )
-        if best_objective is None or objective > best_objective:
-            best_selection = tuple(selection)
-            best_objective = objective
-    assert best_selection is not None and best_objective is not None
-
+    expected = len(best_selection)
     old_to_new = {old: new for new, old in enumerate(best_selection)}
+
     selected_items = []
-    for new_idx, (seed_index, old_idx) in enumerate(zip(seed_indices, best_selection)):
+    for old_idx in best_selection:
         item = copy.deepcopy(items[old_idx])
-        metadata = dict(item.get("source_metadata") or {})
-        metadata.update({
-            "lineage_pool_source_idea_idx": old_idx,
-            "lineage_pool_source_idea_number": old_idx + 1,
-            "lineage_selection_basis": option_basis[seed_index],
-            "lineage_alternative_source_indices": list(options[new_idx]),
-        })
-        item["source_metadata"] = metadata
+        updates = per_item_metadata.get(old_idx)
+        if updates:
+            metadata = dict(item.get("source_metadata") or {})
+            metadata.update(updates)
+            item["source_metadata"] = metadata
         selected_items.append(item)
 
     pair_records_by_key = {
@@ -300,44 +213,204 @@ def select_topic(
         "source_version_pool_n": n_pool,
         "source_version_pool_indices": list(best_selection),
     }
-    selected_ideas = {
+    selected_ideas: dict[str, Any] = {
         "topic_id": topic_id,
-        "generation_mode": "agentic_external_best_version_per_seed",
+        "generation_mode": generation_mode,
         "n_generated": expected,
         "n_requested": expected,
         "source_version_pool_n": n_pool,
         "source_version_pool_indices": list(best_selection),
-        "lineage_selection": {
-            "objective_order": [
-                "quality_gate_pass_count",
-                f"cross_seed_pair_count_at_D>={diversity_min}",
-                "minimum_cross_seed_diversity",
-                "total_weighted_Q",
-                "total_pairwise_diversity",
-                "feasibility_exact_final_tiebreak",
-            ],
-            "quality_weights": {"non_obviousness": 0.4, "soundness": 0.4, "clarity": 0.2},
-            "thresholds": {
-                "non_obviousness": nb_min,
-                "soundness": soundness_min,
-                "clarity": clarity_min,
-                "diversity": diversity_min,
-            },
-            "combinations_considered": combinations_considered,
-            "winning_objective": list(best_objective[:-1]),
-            "fallback_policy": (
-                "use all accepted versions for a seed; only if none exists, use its logged "
-                "primary representative so the output remains exactly seed-budget matched"
-            ),
-        },
         "items": selected_items,
     }
+    if lineage_selection is not None:
+        selected_ideas["lineage_selection"] = lineage_selection
     return selected_ideas, selected_diversity, selected_quality
+
+
+def _validate_pool(
+    ideas_record: dict[str, Any],
+    diversity_record: dict[str, Any],
+    quality_record: dict[str, Any],
+) -> tuple[str, list[dict[str, Any]], int, dict[int, dict[str, int]]]:
+    topic_id = str(ideas_record["topic_id"])
+    if str(diversity_record.get("topic_id")) != topic_id:
+        raise ValueError(f"{topic_id}: diversity topic mismatch")
+    if str(quality_record.get("topic_id")) != topic_id:
+        raise ValueError(f"{topic_id}: quality topic mismatch")
+
+    items = ideas_record.get("items")
+    if not isinstance(items, list) or not items:
+        raise ValueError(f"{topic_id}: lineage pool has no items")
+    n_pool = len(items)
+    if int(diversity_record.get("n_ideas", -1)) != n_pool:
+        raise ValueError(f"{topic_id}: diversity report does not cover the full version pool")
+    if int(quality_record.get("n_ideas", -1)) != n_pool:
+        raise ValueError(f"{topic_id}: quality report does not cover the full version pool")
+
+    quality = _quality_by_idea(quality_record)
+    required = {
+        "nonobviousness", "soundness", "mechanism_clarity_specificity", "feasibility",
+        "significance",
+    }
+    for idx in range(n_pool):
+        if not required.issubset(quality.get(idx, {})):
+            raise ValueError(f"{topic_id}: incomplete external quality scores for idea {idx}")
+
+    return topic_id, items, n_pool, quality
+
+
+def select_topic(
+    ideas_record: dict[str, Any],
+    diversity_record: dict[str, Any],
+    quality_record: dict[str, Any],
+    *,
+    nb_min: int = 6,
+    soundness_min: int = 6,
+    clarity_min: int = 6,
+    diversity_min: int = 6,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    topic_id, items, n_pool, quality = _validate_pool(ideas_record, diversity_record, quality_record)
+
+    grouped: dict[int, list[int]] = {}
+    for idx, item in enumerate(items):
+        metadata = item.get("source_metadata")
+        if not isinstance(metadata, dict) or metadata.get("seed_index") is None:
+            raise ValueError(f"{topic_id}: idea {idx} has no source_metadata.seed_index")
+        grouped.setdefault(int(metadata["seed_index"]), []).append(idx)
+
+    expected = int(
+        ideas_record.get("fresh_seed_budget")
+        or ideas_record.get("n_seed_slots")
+        or len(grouped)
+    )
+    seed_indices = sorted(grouped)
+    if seed_indices != list(range(1, expected + 1)):
+        raise ValueError(
+            f"{topic_id}: expected seed groups 1..{expected}, got {seed_indices}"
+        )
+
+    options: list[list[int]] = []
+    option_basis: dict[int, str] = {}
+    for seed_index in seed_indices:
+        accepted = [
+            idx for idx in grouped[seed_index]
+            if bool((items[idx].get("source_metadata") or {}).get("accepted_version"))
+        ]
+        if accepted:
+            options.append(accepted)
+            option_basis[seed_index] = "all_accepted_parent_child_versions"
+        else:
+            fallbacks = [
+                idx for idx in grouped[seed_index]
+                if bool(
+                    (items[idx].get("source_metadata") or {}).get(
+                        "primary_seed_representative"
+                    )
+                )
+            ]
+            if len(fallbacks) != 1:
+                raise ValueError(
+                    f"{topic_id}: seed {seed_index} needs exactly one non-accepted fallback"
+                )
+            options.append(fallbacks)
+            option_basis[seed_index] = "nonaccepted_seed_fallback"
+
+    pair_lookup = pair_score_lookup(diversity_record.get("pairwise_scores", []))
+    for left, right in itertools.combinations(range(n_pool), 2):
+        if (left, right) not in pair_lookup:
+            raise ValueError(f"{topic_id}: missing diversity pair ({left}, {right})")
+
+    best_selection: tuple[int, ...] | None = None
+    best_objective: tuple[Any, ...] | None = None
+    combinations_considered = 0
+    for selection in itertools.product(*options):
+        combinations_considered += 1
+        objective = _selection_objective(
+            selection,
+            quality=quality,
+            pair_lookup=pair_lookup,
+            nb_min=nb_min,
+            soundness_min=soundness_min,
+            clarity_min=clarity_min,
+            diversity_min=diversity_min,
+        )
+        if best_objective is None or objective > best_objective:
+            best_selection = tuple(selection)
+            best_objective = objective
+    assert best_selection is not None and best_objective is not None
+
+    per_item_metadata = {
+        old_idx: {
+            "lineage_pool_source_idea_idx": old_idx,
+            "lineage_pool_source_idea_number": old_idx + 1,
+            "lineage_selection_basis": option_basis[seed_index],
+            "lineage_alternative_source_indices": list(options[new_idx]),
+        }
+        for new_idx, (seed_index, old_idx) in enumerate(zip(seed_indices, best_selection))
+    }
+    lineage_selection = {
+        "objective_order": [
+            "quality_gate_pass_count",
+            f"cross_seed_pair_count_at_D>={diversity_min}",
+            "minimum_cross_seed_diversity",
+            "total_weighted_Q",
+            "total_pairwise_diversity",
+            "feasibility_exact_final_tiebreak",
+        ],
+        "quality_weights": {"non_obviousness": 0.4, "soundness": 0.4, "clarity": 0.2},
+        "thresholds": {
+            "non_obviousness": nb_min,
+            "soundness": soundness_min,
+            "clarity": clarity_min,
+            "diversity": diversity_min,
+        },
+        "combinations_considered": combinations_considered,
+        "winning_objective": list(best_objective[:-1]),
+        "fallback_policy": (
+            "use all accepted versions for a seed; only if none exists, use its logged "
+            "primary representative so the output remains exactly seed-budget matched"
+        ),
+    }
+    return _finalize_selection(
+        topic_id=topic_id, items=items, diversity_record=diversity_record,
+        quality_record=quality_record, best_selection=best_selection, n_pool=n_pool,
+        generation_mode="agentic_external_best_version_per_seed",
+        lineage_selection=lineage_selection, per_item_metadata=per_item_metadata,
+    )
+
+
+def select_topic_final_accepted(
+    ideas_record: dict[str, Any],
+    diversity_record: dict[str, Any],
+    quality_record: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """use_final_accepted_ideas=True: take exactly the ideas active in the accepted archive
+    at the end of search (source_metadata.active_at_search_end), no re-selection."""
+    topic_id, items, n_pool, _quality = _validate_pool(ideas_record, diversity_record, quality_record)
+
+    active: list[tuple[int, int]] = []  # (seed_index, idx), sorted for a deterministic order
+    for idx, item in enumerate(items):
+        metadata = item.get("source_metadata")
+        if not isinstance(metadata, dict) or metadata.get("seed_index") is None:
+            raise ValueError(f"{topic_id}: idea {idx} has no source_metadata.seed_index")
+        if bool(metadata.get("active_at_search_end")):
+            active.append((int(metadata["seed_index"]), idx))
+    if not active:
+        raise ValueError(f"{topic_id}: no ideas marked active_at_search_end")
+    active.sort()
+    best_selection = tuple(idx for _seed_index, idx in active)
+
+    return _finalize_selection(
+        topic_id=topic_id, items=items, diversity_record=diversity_record,
+        quality_record=quality_record, best_selection=best_selection, n_pool=n_pool,
+        generation_mode="agentic_final_accepted_archive",
+        lineage_selection=None, per_item_metadata={},
+    )
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Select one externally evaluated parent/child representative per fresh seed."
+        description="Select one representative per fresh seed."
     )
     parser.add_argument("--ideas", type=Path, required=True)
     parser.add_argument("--diversity", type=Path, required=True)
@@ -349,6 +422,9 @@ def main() -> None:
     parser.add_argument("--soundness-min", type=int, default=6)
     parser.add_argument("--clarity-min", type=int, default=6)
     parser.add_argument("--diversity-min", type=int, default=6)
+    parser.add_argument(
+        "--use-final-accepted-ideas", action=argparse.BooleanOptionalAction, default=True,
+    )
     args = parser.parse_args()
 
     idea_records = {str(record["topic_id"]): record for record in _read_jsonl(args.ideas)}
@@ -360,17 +436,28 @@ def main() -> None:
     if set(topics) != set(diversity_records) or set(topics) != set(quality_records):
         raise SystemExit("Ideas, diversity, and quality inputs must contain identical topic IDs")
 
+    if not args.use_final_accepted_ideas:
+        print_warning(
+            "use_final_accepted_ideas=False: picking best-K representatives per seed from "
+            "the full parent/child pool using external quality/diversity scores."
+        )
+
     selected_ideas = []
     selected_diversity = []
     selected_quality = []
     for topic_id in topics:
-        ideas, diversity, quality = select_topic(
-            idea_records[topic_id], diversity_records[topic_id], quality_records[topic_id],
-            nb_min=args.nb_min,
-            soundness_min=args.soundness_min,
-            clarity_min=args.clarity_min,
-            diversity_min=args.diversity_min,
-        )
+        if args.use_final_accepted_ideas:
+            ideas, diversity, quality = select_topic_final_accepted(
+                idea_records[topic_id], diversity_records[topic_id], quality_records[topic_id],
+            )
+        else:
+            ideas, diversity, quality = select_topic(
+                idea_records[topic_id], diversity_records[topic_id], quality_records[topic_id],
+                nb_min=args.nb_min,
+                soundness_min=args.soundness_min,
+                clarity_min=args.clarity_min,
+                diversity_min=args.diversity_min,
+            )
         selected_ideas.append(ideas)
         selected_diversity.append(diversity)
         selected_quality.append(quality)
@@ -379,7 +466,7 @@ def main() -> None:
     _write_jsonl(args.output_diversity, selected_diversity)
     _write_jsonl(args.output_quality, selected_quality)
     print(
-        f"Selected exactly one representative per fresh seed for {len(topics)} topic(s).\n"
+        f"Selected representatives for {len(topics)} topic(s).\n"
         f"  ideas: {args.output_ideas}\n"
         f"  diversity: {args.output_diversity}\n"
         f"  quality: {args.output_quality}"

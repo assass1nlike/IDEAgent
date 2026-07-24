@@ -5,9 +5,10 @@ last conv_sliding_window rounds (FIFO; the system message at index 0 is always k
 reset() / reset_for_topic() at the start of each new attempt to clear history.
 
 Agents:
-  IdeatorAgent  — generates and refines the research idea
-  CriticAgent   — challenges the ideator each round
-  FeedbackAgent — evaluates the exchange and provides private guidance to the critic
+  IdeatorAgent — generates and refines the research idea
+  CriticAgent  — challenges the ideator each round
+  QualityAgent — scores non-obviousness/clarity/feasibility and provides private guidance
+                 to the critic (soundness is scored separately, see evaluate_soundness_multi)
 """
 from __future__ import annotations
 
@@ -27,8 +28,11 @@ from ideagent.agent_prompts import (
     build_ideator_next_user_turn,
     build_ideator_opening_user_message,
 )
-from ideagent.comp_quality_eval import _build_comp_user_message
-from ideagent.quality_eval import SOUNDNESS_EVAL_SYSTEM_PROMPT, _QUALITY_RESPONSE_FORMAT
+from ideagent.quality_eval import (
+    SOUNDNESS_EVAL_SYSTEM_PROMPT,
+    _QUALITY_RESPONSE_FORMAT,
+    _build_idea_user_message,
+)
 
 
 FEEDBACK_RUBRIC_IDS = (
@@ -169,7 +173,7 @@ class _BaseAgent:
         call (no .respond(), no growing conversation), but the background/avoidance context
         resent each time is stable for the whole topic -- so all candidates for one topic
         must share ONE cache key to route to the same warm cache. Including a per-candidate
-        id (e.g. yield_loop's idea_id, which changes every single call) would give every
+        id (e.g. generation_loop's idea_id, which changes every single call) would give every
         generation its own key and defeat caching entirely, even though the content
         actually repeats. Backends that don't read this kwarg (Gemini, vLLM) ignore it."""
         source = f"{self.log_context.get('topic_id', '')}/{self.role}"
@@ -311,7 +315,7 @@ class CriticAgent(_BaseAgent):
         return new_challenge
 
 
-class FeedbackAgent(_BaseAgent):
+class QualityAgent(_BaseAgent):
     def reset_for_topic(
         self,
         *,
@@ -382,8 +386,8 @@ def _generation_floor_failures(
     Returns the name(s) of whichever gate(s) are below their floor THIS round (empty if all
     clear). Soundness is NOT checked here -- it's scored by a standalone dedicated judge
     (evaluate_soundness_multi), not by feedback's own rubric_assessment. This only detects;
-    the result is included in FeedbackAgent.evaluate()'s return dict but not currently read
-    by yield_loop.py. Missing rubric data defaults to "satisfied" so a parsing gap never
+    the result is included in QualityAgent.evaluate()'s return dict but not currently read
+    by generation_loop.py. Missing rubric data defaults to "satisfied" so a parsing gap never
     fabricates a failure."""
     by_id = {r["id"]: r for r in rubrics if isinstance(r, dict) and "id" in r}
 
@@ -634,7 +638,7 @@ def evaluate_soundness_multi(
     content) benefit regardless."""
     messages = [
         {"role": "system", "content": SOUNDNESS_EVAL_SYSTEM_PROMPT},
-        {"role": "user", "content": _build_comp_user_message({"text": ideator_turn}, "soundness")},
+        {"role": "user", "content": _build_idea_user_message({"text": ideator_turn}, "soundness")},
     ]
     call_kwargs = dict(gen_kwargs)
     if prompt_cache_key:

@@ -28,13 +28,6 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from ideagent.clients import GeminiClient, build_client
-from ideagent.comp_quality_eval import (
-    ComprehensiveQualityEvaluator,
-    GeminiComprehensiveQualityEvaluator,
-    discover_topics,
-    extract_ideas_from_record,
-    extract_ideas_from_responses,
-)
 from ideagent.console import print_warning
 from ideagent.diversity_eval import (
     AXIS_CALL_MODES,
@@ -43,6 +36,13 @@ from ideagent.diversity_eval import (
     TopicalDiversityEvaluator,
     detect_format,
     extract_ideas_from_agentic_record,
+)
+from ideagent.quality_eval import (
+    GeminiQualityEvaluator,
+    QualityEvaluator,
+    discover_topics,
+    extract_ideas_from_record,
+    extract_ideas_from_responses,
 )
 from ideagent.utils import append_jsonl, create_jsonl, load_config, read_jsonl
 
@@ -127,7 +127,7 @@ def run_quality_eval(
     print(f"[quality] Output:         {output_path}")
 
     client, escalation_client = _build_client_pair(evaluator_cfg, client_cfg)
-    EvaluatorClass = GeminiComprehensiveQualityEvaluator if isinstance(client, GeminiClient) else ComprehensiveQualityEvaluator
+    EvaluatorClass = GeminiQualityEvaluator if isinstance(client, GeminiClient) else QualityEvaluator
     evaluator = EvaluatorClass(
         client=client,
         gen_kwargs=_quality_sampling(evaluator_cfg),

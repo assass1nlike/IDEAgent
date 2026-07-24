@@ -13,7 +13,7 @@ plus baseline generation methods used for comparison.
 │   ├── simple/        # stateless-independent, single-shot batch, and
 │   │                  # sequential-memory baselines
 │   └── nova/          # NOVA-style closed-book baseline
-├── scripts/           # runners and evaluators (run_yield_archive.py,
+├── scripts/           # runners and evaluators (run_ideagent.py,
 │                      # eval_ideas.py, select_lineage_representatives.py)
 ├── configs/           # canonical YAML configs for each pipeline
 └── data/              # topic input data
@@ -31,7 +31,7 @@ Set the relevant API keys as environment variables or in a `.env` file
 ## Run IDEAgent (main system)
 
 ```bash
-python scripts/run_yield_archive.py --config configs/ideagent.yaml
+python scripts/run_ideagent.py --config configs/ideagent.yaml
 ```
 
 ## Run a baseline

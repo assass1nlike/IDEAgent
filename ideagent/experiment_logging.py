@@ -15,7 +15,6 @@ import sys
 import threading
 import time
 import uuid
-from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
@@ -226,10 +225,6 @@ class TracedClient:
         with self._context_lock:
             self._context = dict(context)
 
-    def update_trace_context(self, **context: Any) -> None:
-        with self._context_lock:
-            self._context.update(context)
-
     def _context_copy(self) -> dict[str, Any]:
         with self._context_lock:
             return dict(self._context)
@@ -338,18 +333,3 @@ def set_trace_context(client: Any, **context: Any) -> None:
     setter = getattr(client, "set_trace_context", None)
     if callable(setter):
         setter(**context)
-
-
-@contextmanager
-def temporary_trace_context(client: Any, **context: Any) -> Iterator[None]:
-    """Temporarily replace a traced client's context; no-op for ordinary/fake clients."""
-
-    if not isinstance(client, TracedClient):
-        yield
-        return
-    previous = client._context_copy()
-    client.set_trace_context(**context)
-    try:
-        yield
-    finally:
-        client.set_trace_context(**previous)

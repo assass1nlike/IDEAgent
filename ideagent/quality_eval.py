@@ -1,10 +1,23 @@
-"""Additional post-hoc quality evaluator for generated research ideas.
+"""Post-hoc quality evaluator for generated research ideas.
 
 Scores five independent per-idea metrics -- non-obviousness, soundness, mechanism
 clarity/specificity, feasibility, and significance -- each 0-9. Every (idea, metric)
 pair is one independent LLM call; no metric's prompt ever sees another metric's score,
 so a halo effect on one axis (e.g. "this sounds important, so it must be sound too")
 cannot leak into another. All N*5 calls run concurrently in a single flat pool.
+
+Scores the ideator's full final response text for each idea, not the compressed
+final_idea_core summary. Reads responses/<topic_id>/ep<episode_id>/ideator.jsonl, where
+episode_id = idea_idx + 1 (confirmed against final_idea_cores.jsonl's own
+final_idea_core.episode_id field -- episode folder "ep1" holds items[0], "ep2" holds
+items[1], etc.), and takes the LATEST-`timestamp` "open"/"respond" record's text -- the
+ideator's final, fully-refined response after all critic rounds in that episode -- as
+that idea's full content. Each round's ideator.jsonl also holds a "core" event record
+(that round's extracted final_idea_core) interleaved with the text records; those are
+excluded here since they don't carry idea text. Some files are the concatenation of an
+earlier run's records plus a later (e.g. resumed) run's records appended after, where
+`sequence` numbering does not necessarily stay monotonic across the join, so `timestamp`
+(not `sequence`) is the only reliable way to find the true most-recent record.
 
 Diversity (whether generated ideas differ from one another) is a separate, pairwise
 concern handled by diversity_eval.py -- not mixed in here.
@@ -16,12 +29,14 @@ import json
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from tqdm import tqdm
 
 from ideagent.console import print_warning
-from ideagent.diversity_eval import _render_idea_block
+from ideagent.utils import read_jsonl
 
 
 _METRICS = (
@@ -58,7 +73,7 @@ class QualityReport:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# JSON schema for structured output (shared across all four metrics)
+# JSON schema for structured output (shared across all five metrics)
 # ─────────────────────────────────────────────────────────────────────────────
 
 _QUALITY_RESPONSE_FORMAT = {
@@ -393,13 +408,86 @@ def _parse_quality_score(raw: str, *, idx: int, metric: str) -> QualityScore | N
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Prompt builders
+# Idea-text discovery (full ideator response, not the compressed final_idea_core)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def discover_topics(responses_root: Path) -> list[tuple[str, int]]:
+    """List (topic_id, n_ideas) pairs directly from the responses/ directory tree --
+    topic_id = each subdirectory name; n_ideas = the highest episode-folder number
+    found under it (episode folders are 1-based: "ep1".."ep<n_ideas>")."""
+    topics = []
+    for topic_dir in sorted(responses_root.iterdir()):
+        if not topic_dir.is_dir():
+            continue
+        episode_ids = [
+            int(d.name[2:]) for d in topic_dir.iterdir()
+            if d.is_dir() and d.name.startswith("ep") and d.name[2:].isdigit()
+        ]
+        if not episode_ids:
+            continue
+        topics.append((topic_dir.name, max(episode_ids)))
+    return topics
+
+
+def _record_timestamp(record: dict[str, Any]) -> datetime:
+    try:
+        return datetime.fromisoformat(str(record.get("timestamp", "")))
+    except ValueError:
+        return datetime.min.replace(tzinfo=timezone.utc)
+
+
+def load_final_ideator_text(responses_root: Path, topic_id: str, idea_idx: int) -> str | None:
+    """responses/<topic_id>/ep<idea_idx + 1>/ideator.jsonl -> latest-timestamp text.
+
+    Only "open"/"respond" records carry idea text; "core" records (that round's
+    extracted final_idea_core, logged alongside) are excluded from the search."""
+    path = responses_root / topic_id / f"ep{idea_idx + 1}" / "ideator.jsonl"
+    if not path.exists():
+        return None
+    records = [r for r in read_jsonl(path) if r.get("event") in ("open", "respond")]
+    if not records:
+        return None
+    last = max(records, key=_record_timestamp)
+    text = str(last.get("text", "")).strip()
+    return text or None
+
+
+def extract_ideas_from_responses(
+    responses_root: Path, topic_id: str, n_ideas: int
+) -> list[dict[str, Any]]:
+    ideas = []
+    for idx in range(n_ideas):
+        text = load_final_ideator_text(responses_root, topic_id, idx)
+        if text is None:
+            print_warning(
+                f"[quality_eval] {topic_id}: no final ideator response for idea "
+                f"{idx} (episode {idx + 1}); skipping idea."
+            )
+            continue
+        ideas.append({"idx": idx, "text": text})
+    return ideas
+
+
+def extract_ideas_from_record(record: dict[str, Any]) -> list[dict[str, Any]]:
+    """Read the common untouched full-text field used by all new generation methods."""
+
+    ideas: list[dict[str, Any]] = []
+    for idx, item in enumerate(record.get("items", [])):
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("idea_text", "")).strip()
+        if text:
+            ideas.append({"idx": idx, "text": text})
+    return ideas
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Prompt builder
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _build_idea_user_message(idea: dict[str, Any], metric: str) -> str:
-    block = _render_idea_block("IDEA", idea)
     return (
-        f"{block}\n\n"
+        f"<IDEA>\n{idea['text']}\n</IDEA>\n\n"
         f"Score this research idea's {_METRIC_LABELS[metric]}. "
         "Return strict JSON and nothing else."
     )
@@ -409,7 +497,7 @@ def _build_idea_user_message(idea: dict[str, Any], metric: str) -> str:
 # Evaluator
 # ─────────────────────────────────────────────────────────────────────────────
 
-class AdditionalQualityEvaluator:
+class QualityEvaluator:
     def __init__(
         self,
         *,
@@ -471,10 +559,6 @@ class AdditionalQualityEvaluator:
             executor.shutdown(wait=False, cancel_futures=True)
 
     def _build_idea_user_message(self, idea: dict[str, Any], metric: str) -> str:
-        """Overridable so subclasses can score a different idea representation
-        (e.g. quality_eval_comp.py scores the full final ideator response text
-        instead of the compressed final_idea_core summary) while reusing everything
-        else (pool/retry/resume/output logic) unchanged."""
         return _build_idea_user_message(idea, metric)
 
     def evaluate_metric(self, idea: dict[str, Any], metric: str) -> QualityScore | None:
@@ -521,9 +605,9 @@ class AdditionalQualityEvaluator:
         return QualityReport(topic_id=topic_id, n_ideas=n, scores=scores)
 
 
-class GeminiAdditionalQualityEvaluator(AdditionalQualityEvaluator):
+class GeminiQualityEvaluator(QualityEvaluator):
     """Async variant for Gemini models -- uses asyncio.gather instead of ThreadPoolExecutor.
-    All prompts, parsers, and retry logic are inherited from AdditionalQualityEvaluator.
+    All prompts, parsers, and retry logic are inherited from QualityEvaluator.
     max_workers controls the asyncio.Semaphore cap on concurrent in-flight requests."""
 
     async def _acall_with_retry(

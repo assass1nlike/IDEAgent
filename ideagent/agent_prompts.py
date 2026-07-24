@@ -11,7 +11,6 @@ no L1/L2 memory, no eval/train modes.
 """
 from __future__ import annotations
 
-import json
 from typing import Any
 
 
@@ -114,14 +113,6 @@ def _score_trend_block() -> str:
         "current per-rubric scores and textual feedback for judgment.\n"
         "</AGGREGATE_SCORE_DISABLED>"
     )
-
-
-def _json_block(tag: str, payload: Any) -> str:
-    if payload is None:
-        body = "(none)"
-    else:
-        body = json.dumps(payload, ensure_ascii=False, indent=2)
-    return f"<{tag}>\n{body}\n</{tag}>"
 
 
 _GUIDANCE_REQUEST_DIRECTIVE = (
@@ -251,24 +242,6 @@ _STRUCTURE_ONLY_EXAMPLE_NOTE = (
     "they are genuinely correct):"
 )
 
-_FINAL_IDEA_CORE_OUTPUT_EXAMPLE = """{
-  "core_claim": "<one sentence: what the idea claims to do right now>",
-  "idea_summary": "<sentence 1: problem and why it matters>. <sentence 2: proposed mechanism>. <sentence 3: causal chain>. <sentence 4: expected outcome and evaluation>. <sentence 5: explicit scope boundary>.",
-  "mechanism": "<the central causal lever, as stated right now>",
-  "problem_targeted": "<the specific problem or gap this idea attacks, as it stands right now>",
-  "source_gap": "<one plain sentence naming the background limitation/tension this idea exploits — a property of the existing work, not of this idea's solution>",
-  "expected_effect": "<the measurable or qualitative outcome the mechanism should produce>",
-  "major_keywords": [
-    "<key technique or method name>",
-    "<domain concept>",
-    "<algorithmic primitive>",
-    "<named framework or objective>",
-    "<other defining term>"
-  ],
-  "generic_theme": "<specific territory this idea occupies — one level above mechanism/problem, still pinned to this idea's angle>",
-  "parent_theme": "<research branch, 3-8 words, conference-track granularity — one level above generic_theme>"
-}"""
-
 _FEEDBACK_OUTPUT_EXAMPLE = """{
   "rubric_assessment": [
     {
@@ -319,73 +292,6 @@ _FEEDBACK_OUTPUT_EXAMPLE = """{
 
 
 # ======================================================================================
-# Final idea core extraction (every round; no separate history-aggregation step)
-# ======================================================================================
-FINAL_IDEA_CORE_SYSTEM_PROMPT = (
-    "You extract the full core of a research idea from the latest ideator turn. "
-    "Read ONLY the latest ideator turn — do not compare to prior rounds or track history; "
-    "capture the idea exactly as it stands right now, from this text alone. Use only what "
-    "is explicitly stated or a direct, mechanical consequence of it.\n\n"
-    "Nine fields to generate:\n"
-    "- core_claim: one sentence — what the idea claims to do right now.\n"
-    "- idea_summary: exactly 4-5 sentences: [1] what problem this idea targets and why it "
-    "matters, [2] the core mechanism, [3] why that mechanism addresses the problem (causal "
-    "chain), [4] expected outcome and how it would be evaluated, [5] explicit scope boundary.\n"
-    "- mechanism: the central causal lever — how the idea achieves its claim, as stated right now.\n"
-    "- problem_targeted: the specific problem or gap this idea attacks, as it stands right now.\n"
-    "- source_gap: in ONE plain-language sentence, name the SPECIFIC LIMITATION, weakness, or "
-    "unresolved tension IN THE BACKGROUND PAPERS that this idea exploits as its starting point — "
-    "i.e., what shortcoming of the existing work made this idea necessary. State it as a property "
-    "of the background ('the background methods assume X / cannot handle Y / leave Z unaddressed'), "
-    "NOT as a description of this idea's solution. Use no coined names or acronyms — ordinary words "
-    "only. Two ideas that exploit the same background limitation share a source_gap even if their "
-    "mechanisms differ.\n"
-    "- expected_effect: the measurable or qualitative outcome the mechanism is expected to produce.\n"
-    "- major_keywords: exactly 5 key terms (no more) — the most central named techniques, domain "
-    "concepts, and algorithmic primitives for this idea. Include both specific method names and "
-    "broader conceptual terms; if more than 5 come to mind, keep only the 5 most defining.\n"
-    "- generic_theme: the SPECIFIC TERRITORY this idea occupies — one level of abstraction above "
-    "the mechanism and problem, but still pinned to this idea's particular angle. "
-    "E.g., if mechanism is 'ASSB with COMMIT_STATE operators' and problem is 'KV-cache pollution "
-    "from failed paths', generic_theme is 'Latent state manipulation for reasoning control in LLMs'. "
-    "Do not repeat the mechanism or problem name verbatim — name the territory they occupy.\n"
-    "- parent_theme: the RESEARCH BRANCH this idea belongs to — one level above generic_theme, at "
-    "the granularity of a conference track or research area. Must be 3-8 words. Two ideas with "
-    "completely different mechanisms can share the same parent_theme if they live under the same "
-    "branch. parent_theme must NOT reuse words from mechanism or problem_targeted verbatim. "
-    "Think: what label would a program committee use to route this paper to the right track? "
-    "Examples: 'Reinforcement learning for language model training', "
-    "'Inference-time search and compute scaling', 'Data curation and curriculum learning', "
-    "'Efficient attention and memory architectures', 'Alignment and preference optimization'. "
-    "Generate parent_theme by zooming out one level from generic_theme."
-)
-
-
-def build_final_idea_core_messages(
-    *,
-    background_context: str,
-    latest_ideator_turn: str,
-) -> list[dict[str, str]]:
-    """Extract the idea's full core directly from the latest ideator turn; no history or
-    prior cores needed — every field is read fresh from this text alone."""
-    parts = [
-        background_context,
-        f"<LATEST_IDEATOR_TURN>\n{latest_ideator_turn.strip()}\n</LATEST_IDEATOR_TURN>",
-        (
-            "Extract the full core of this idea as it stands right now. Return strict JSON "
-            "and nothing else. idea_summary must be exactly 4-5 sentences following the "
-            "structure in the system prompt. Keys must appear in exactly the order shown below.\n"
-            f"{_STRUCTURE_ONLY_EXAMPLE_NOTE}\n"
-            f"{_FINAL_IDEA_CORE_OUTPUT_EXAMPLE}"
-        ),
-    ]
-    return [
-        {"role": "system", "content": FINAL_IDEA_CORE_SYSTEM_PROMPT},
-        {"role": "user", "content": "\n\n".join(parts)},
-    ]
-
-
-# ======================================================================================
 # Agentic system prompts and message builders
 #
 # Each agent owns a growing multi-turn messages list per topic; reset between topics.
@@ -406,7 +312,7 @@ PLAIN_LANGUAGE_RULE = (
 )
 
 # Standalone so it can be added/removed from IDEATOR_SYSTEM_PROMPT below in one place --
-# just delete/comment the "+ _IDEATOR_SOUNDNESS_RUBRIC + ..." line where it's spliced in.
+# just delete/comment the "+ IDEATOR_SOUNDNESS_RUBRIC + ..." line where it's spliced in.
 IDEATOR_SOUNDNESS_RUBRIC = f"""\
 **This is exactly the bar your mechanism will be held to (so self-reflect on this before \
 providing your final answer)**
@@ -435,9 +341,6 @@ DO NOT  judge novelty, jargon, or hedged phrasing for their own sake — only
 whether the causal chain from mechanism to claimed effect actually, logically holds.
 Padding the write-up with certification/statistical-guardrail language should not raise
 this score by itself; the underlying causal steps have to actually be valid."""
-
-# Backward-compatible private name for older imports.
-_IDEATOR_SOUNDNESS_RUBRIC = IDEATOR_SOUNDNESS_RUBRIC
 
 IDEATOR_SYSTEM_PROMPT = (
     "You are a creative but rigorous research ideator developing NOVEL and DIVERSE ideas. You develop research ideas grounded in "
@@ -546,19 +449,11 @@ def build_feedback_system_prompt(
     *,
     summary_only: bool = False,
 ) -> str:
-    """Build the feedback system prompt; prior cores embedded across all turns."""
-    prior_block = render_prior_cores_block(prior_final_idea_cores or [], summary_only=summary_only)
-    prior_section = ""
-    if prior_block:
-        prior_section = (
-            "PRIOR COMPLETED EPISODES — generic themes, mechanisms, and problems already covered. "
-            "If the current idea shares the same generic_theme as any prior episode, or enters "
-            "the same mechanism/problem space, reflect that in the relevant rubric scores "
-            "(prior_episode_overlap, source_boundedness/narrowness, motivation_distinctness) and "
-            "use hint_for_critic to name a genuinely different territory to explore.\n"
-            + prior_block
-            + "\n\n"
-        )
+    """Build the feedback system prompt.
+
+    prior_final_idea_cores/summary_only are always empty/unused by every current caller
+    (the live search always passes prior_final_idea_cores=[]) but are kept in the
+    signature for call-site compatibility."""
     advisor_note = (
         "You advise ONLY the critic — never the ideator (the ideator must never receive anything "
         "from you, directly or indirectly). After each round you evaluate per-rubric progress and "
@@ -574,154 +469,9 @@ def build_feedback_system_prompt(
         "You are a rigorous research evaluator silently observing the critic↔ideator discussion. "
         "You rely ENTIRELY on your own learned judgment to sense whether the discussion is "
         "converging on something genuinely strong, and to guide the critic.\n\n"
-        + prior_section
         + advisor_note
     )
 
-
-
-def render_prior_cores_block(cores: list[dict[str, Any]], *, summary_only: bool = False) -> str:
-    """Render a list of prior episode summaries (or legacy stable cores) as an avoidance block.
-
-    When summary_only=True, each prior episode contributes ONLY its idea_summary — no
-    structured fields (themes, source_gap, mechanism, problem, keywords) are passed."""
-    if not cores:
-        return ""
-    entries = []
-    for i, core in enumerate(cores, 1):
-        episode_id = str(core.get("episode_id", i))
-        entry_lines = [f"[Idea {i} — episode {episode_id}]"]
-
-        if summary_only:
-            idea_summary = str(core.get("idea_summary", "")).strip() or str(core.get("core_claim", "")).strip()
-            if idea_summary:
-                entry_lines.append(f"  Idea: {idea_summary}")
-        elif "generic_theme" in core or "idea_summary" in core:
-            # FinalIdeaCore format
-            source_gap = str(core.get("source_gap", "")).strip()
-            parent_theme = str(core.get("parent_theme", "")).strip()
-            generic_theme = str(core.get("generic_theme", "")).strip()
-            mechanism = str(core.get("mechanism", "")).strip()
-            problem_targeted = str(core.get("problem_targeted", "")).strip()
-            major_kw = core.get("major_keywords", [])
-            keywords = "; ".join(
-                str(s) for s in (major_kw[:5] if isinstance(major_kw, list) else [])
-            )
-            idea_summary = str(core.get("idea_summary", "")).strip()
-            if parent_theme:
-                entry_lines.append(f"  [BRANCH]   Parent theme: {parent_theme}")
-            if generic_theme:
-                entry_lines.append(f"  [AREA]     Generic theme: {generic_theme}")
-            if source_gap:
-                entry_lines.append(f"  [SOURCE GAP]: {source_gap}")
-            core_claim = str(core.get("core_claim", "")).strip()
-            if core_claim:
-                entry_lines.append(f"  Core claim: {core_claim}")
-            if mechanism:
-                entry_lines.append(f"  Mechanism: {mechanism}")
-            if problem_targeted:
-                entry_lines.append(f"  Problem targeted: {problem_targeted}")
-            if keywords:
-                entry_lines.append(f"  Keywords: {keywords}")
-            if idea_summary:
-                entry_lines.append(f"  Idea: {idea_summary}")
-        else:
-            # Legacy IdeaCore format
-            core_claim = str(core.get("core_claim", "")).strip()
-            problem = str(core.get("problem_targeted", "")).strip()
-            mechanism = str(core.get("mechanism", "")).strip()
-            avoid = mechanism or core_claim
-            if problem:
-                entry_lines.append(f"  Problem targeted: {problem}")
-            entry_lines.append(f"  Contribution: {core_claim}")
-            if avoid:
-                entry_lines.append(f"  Avoid reusing: {avoid}")
-
-        entries.append("\n".join(entry_lines))
-
-    body = "\n\n".join(entries)
-    if summary_only:
-        header = (
-            "<PRIOR_COMPLETED_IDEAS — TERRITORY ALREADY COVERED IN THIS TOPIC\n"
-            'note="completed episodes, given as summaries only; use ONLY to understand what '
-            'ground is covered">\n'
-            "Your idea MUST be genuinely distinct from every prior idea summarised below — a "
-            "different research direction, mechanism, and target problem.\n"
-            "Do NOT extract sub-questions or hypotheses from these entries — "
-            "identifying an uncovered gap is entirely the ideator's job.\n\n"
-        )
-    else:
-        header = (
-            "<PRIOR_COMPLETED_IDEAS — TERRITORY ALREADY COVERED IN THIS TOPIC\n"
-            'note="completed episodes; use ONLY to understand what ground is covered; '
-            'diversify by avoiding prior research branches, territories, and source limitations">\n'
-            "AVOIDANCE PRIORITY ORDER:\n"
-            "1. BRANCH (parent_theme) — do not land in the same research branch as any prior idea. "
-            "A different mechanism in the same branch is not enough.\n"
-            "2. TERRITORY (generic_theme) — do not occupy the same specific territory as any prior idea, "
-            "even if the branch differs.\n"
-            "3. SOURCE GAP — do not exploit the same background limitation as any prior idea. "
-            "A new mechanism or theme label for the SAME underlying gap is a reskin, not a new idea.\n"
-            "Also do not reuse the same mechanism, problem framing, or keyword vocabulary.\n"
-            "Do NOT extract sub-questions or hypotheses from these entries — "
-            "identifying an uncovered gap is entirely the ideator's job.\n\n"
-        )
-    return header + body + "\n</PRIOR_COMPLETED_IDEAS>"
-
-
-def render_feedback_guidance_for_critic(verdict: dict[str, Any]) -> str:
-    """Convert a feedback verdict dict into the private guidance text passed to the critic."""
-    mode = str(verdict.get("critic_guidance_mode", "none")).strip().lower()
-    if mode not in {"blend", "continue", "pivot"}:
-        return ""
-    hint = str(verdict.get("hint_for_critic", "")).strip()
-    expected = str(verdict.get("expected_ideator_direction", "")).strip()
-    remark = str(verdict.get("critic_positive_remark", "")).strip()
-    bottleneck = str(verdict.get("primary_bottleneck", "")).strip()
-    rubric_lines: list[str] = []
-    rubrics = verdict.get("rubric_assessment", [])
-    if isinstance(rubrics, list):
-        for item in rubrics:
-            if not isinstance(item, dict):
-                continue
-            rubric_id = str(item.get("id", "")).strip()
-            score = item.get("score", 0)
-            text = str(item.get("critic_pressure", "")).strip() or str(item.get("evidence", "")).strip()
-            if rubric_id and text:
-                compact = " ".join(text.split())
-                if len(compact) > 260:
-                    compact = compact[:257].rstrip() + "..."
-                rubric_lines.append(f"  - {rubric_id}: {compact} [{score}]")
-    if mode == "pivot":
-        lines = ["critic_guidance_mode: pivot"]
-        if bottleneck:
-            lines.append(f"primary_bottleneck: {bottleneck}")
-        if hint:
-            lines.append(f"pivot_direction: {hint}")
-        if expected:
-            lines.append(f"expected_ideator_direction: {expected}")
-        return "\n".join(lines)
-    if mode == "blend" and hint:
-        lines = ["critic_guidance_mode: blend"]
-        if bottleneck:
-            lines.append(f"primary_bottleneck: {bottleneck}")
-        if rubric_lines:
-            lines.append("rubric_feedback:")
-            lines.extend(rubric_lines)
-        lines.append(f"hint_for_critic: {hint}")
-        if expected:
-            lines.append(f"expected_ideator_direction: {expected}")
-        return "\n".join(lines)
-    if mode == "continue" and (remark or expected):
-        lines = ["critic_guidance_mode: continue"]
-        if bottleneck:
-            lines.append(f"primary_bottleneck: {bottleneck}")
-        if remark:
-            lines.append(f"critic_positive_remark: {remark}")
-        if expected:
-            lines.append(f"expected_ideator_direction: {expected}")
-        return "\n".join(lines)
-    return ""
 
 
 def build_critic_kickstart_user_message(
@@ -868,33 +618,12 @@ def build_feedback_user_turn(
     latest_ideator_turn: str,
     current_final_idea_core: dict[str, Any] | None = None,
 ) -> str:
-    """User message to the feedback model: latest exchange + rubric + guidance directives."""
+    """User message to the feedback model: latest exchange + rubric + guidance directives.
+
+    current_final_idea_core is always None from every current caller (the live search never
+    extracts a themed core mid-round) but is kept in the signature for call-site
+    compatibility."""
     parts = [_latest_exchange_block(latest_ideator_turn, prev_critic_turn)]
-    if current_final_idea_core:
-        theme_lines = []
-        pt = str(current_final_idea_core.get("parent_theme", "")).strip()
-        gt = str(current_final_idea_core.get("generic_theme", "")).strip()
-        claim = str(current_final_idea_core.get("core_claim", "")).strip()
-        mech = str(current_final_idea_core.get("mechanism", "")).strip()
-        prob = str(current_final_idea_core.get("problem_targeted", "")).strip()
-        if pt:
-            theme_lines.append(f"  parent_theme: {pt}")
-        if gt:
-            theme_lines.append(f"  generic_theme: {gt}")
-        if claim:
-            theme_lines.append(f"  core_claim: {claim}")
-        if mech:
-            theme_lines.append(f"  mechanism: {mech}")
-        if prob:
-            theme_lines.append(f"  problem_targeted: {prob}")
-        if theme_lines:
-            parts.append(
-                "<CURRENT_IDEA_CORE\n"
-                'note="extracted from the latest ideator turn; compare parent_theme and '
-                'generic_theme directly against prior episodes in your system prompt">\n'
-                + "\n".join(theme_lines)
-                + "\n</CURRENT_IDEA_CORE>"
-            )
     parts += [
             _score_trend_block(),
             f"<RUBRIC_DIRECTIVE>\n{_RUBRIC_DIRECTIVE}\n</RUBRIC_DIRECTIVE>",

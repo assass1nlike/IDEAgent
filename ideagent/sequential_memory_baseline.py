@@ -41,7 +41,7 @@ from ideagent.signature import (
     signature_to_final_idea_core,
 )
 from ideagent.utils import append_jsonl, create_jsonl, prepare_output_dir, read_jsonl
-from ideagent.yield_prompts import op_free_baseline
+from ideagent.prompts import op_free_baseline
 
 
 @dataclass(frozen=True)

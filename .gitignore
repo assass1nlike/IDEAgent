@@ -9,6 +9,7 @@ __pycache__/
 .pyre/
 .coverage
 .coverage.*
+uv.lock
 coverage.xml
 htmlcov/
 

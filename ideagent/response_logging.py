@@ -36,12 +36,6 @@ class AsyncResponseLogger:
         self._closed = False
         self._sequence = 0
 
-    @classmethod
-    def from_config(cls, config: Mapping[str, Any] | None) -> "AsyncResponseLogger":
-        config = config or {}
-        root_path = config.get("path") or config.get("root") or config.get("dir")
-        return cls(config, root_path=root_path)
-
     @property
     def enabled(self) -> bool:
         return bool(self.paths or self.root_path)
