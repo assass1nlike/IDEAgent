@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ideagent"
+version = "0.1.0"
+description = "IDEAgent: an agentic quality-diversity search system for research idea generation, with baseline implementations for comparison."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "openai",
+    "backoff",
+    "PyYAML",
+    "python-dotenv",
+    "google-genai",
+    "anthropic",
+    "rich",
+    "tqdm",
+    "sentence-transformers",
+    "scikit-learn",
+    "matplotlib",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.setuptools.packages.find]
+include = ["ideagent*", "baselines*"]

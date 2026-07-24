@@ -1,0 +1,38 @@
+data:
+  input_jsonl: data/bkgd_papers.jsonl
+  output_dir: results_organized/generations/single-shot-baseline
+
+baseline:
+  # Single-shot batch: ONE generator call per topic returns all 10 ideas, delimited by
+  # '=== IDEA k ===' headers. Same system prompt and pressure blocks as sequential memory;
+  # the memory-avoid block is replaced by within-response mutual distinctness (the only
+  # diversity signal one call can act on besides the background). Floor anchor of the ladder.
+  mode: single_shot
+  n_ideas: 10
+  init_topic_idx: 0
+  end_topic_idx: null
+  resume: true
+  min_idea_chars: 300
+  signature_char_cap: 256
+  # max_background_tokens: null
+
+client:
+  request_timeout: 3600
+
+generator:
+  # Same ideator model and reasoning effort as QD; the output cap is raised because one
+  # response must carry all 10 complete ideas (~10x the per-idea budget).
+  model_id: gpt-5.6-sol
+  api_key_env: OPENAI_API_KEY
+  enable_thinking: true
+  thinking_effort: low
+  max_new_tokens: 65536
+
+steno:
+  # Output-compatibility signatures only; never fed back to the generator.
+  model_id: gemini-2.5-flash
+  api_key_env: GEMINI_API_KEY
+  temperature: 1.0
+  top_p: 0.95
+  enable_thinking: false
+  max_new_tokens: 1024

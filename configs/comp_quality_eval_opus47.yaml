@@ -1,0 +1,20 @@
+data:
+  resume: true
+  output_jsonl: results/comp_quality_report.jsonl  # placeholder -- override via --input/--output per run
+
+evaluator:
+  # claude-opus-4-7 via the direct Anthropic API. No temperature/top_p -- Opus 4.7 rejects
+  # sampling params with a 400; adaptive thinking/effort is the steering knob instead (see
+  # clients.py). No api_key_env -- auth reads ANTHROPIC_API_KEY from the environment/.env.
+  model_id: claude-opus-4-7
+  enable_thinking: true
+  thinking_effort: high
+  max_new_tokens: 16384
+
+client:
+  request_timeout: 3600
+
+eval:
+  max_parsing_retries: 10
+  max_workers: 64
+  max_topics: null

@@ -1,0 +1,36 @@
+data:
+  resume: true
+  input_jsonl: data/agentic_ideas.jsonl  # placeholder -- override via --input/--output per run
+  output_jsonl: results/diversity_report.jsonl
+
+evaluator:
+  # claude-opus-4-7 via the direct Anthropic API. No temperature/top_p -- Opus 4.7 rejects
+  # sampling params with a 400; adaptive thinking/effort is the steering knob instead (see
+  # clients.py). No api_key_env -- auth reads ANTHROPIC_API_KEY from the environment/.env.
+  model_id: claude-opus-4-7
+  # independent: 8 calls per pair (one per axis), then a separate final-class call.
+  # joint_axes:  1 call per pair for all 8 axes, then the same separate final-class call.
+  # joint_axes is the default lower-cost mode; select independent explicitly for the
+  # higher-cost one-call-per-axis sensitivity evaluation.
+  axis_call_mode: joint_axes
+  enable_thinking: true
+  thinking_effort: high
+  max_new_tokens: 16384
+  # Stage-specific thinking: independent axis and class calls are narrow
+  # classification tasks; signature extraction is moderate.
+  signature_thinking_effort: medium
+  signature_max_new_tokens: 4096
+  axis_thinking_effort: low
+  axis_max_new_tokens: 2048
+  joint_axis_thinking_effort: low
+  joint_axis_max_new_tokens: 16384
+  pair_thinking_effort: low
+  pair_max_new_tokens: 16384
+
+client:
+  request_timeout: 300
+
+eval:
+  max_parsing_retries: 10
+  max_workers: 64
+  max_topics: null

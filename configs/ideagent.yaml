@@ -1,0 +1,134 @@
+data:
+  input_jsonl: data/bkgd_papers.jsonl
+  output_dir: results/yield-immediate-seed10
+
+run:
+  init_topic_idx: 0   # 0-indexed: skip this many topics before starting
+  end_topic_idx: 1    # 0-indexed, exclusive: stop before this topic (unset = run to the end)
+  resume: true        # true = skip topics already in final_idea_cores.jsonl instead of wiping output_dir
+
+  # ── independent seed budget ──
+  # Exactly 10 FREE seeds are generated. Each seed then gets at most two auxiliary drafts total
+  # across repair AND accepted polishing, so the hard ceiling is 10 * (1 + 2) = 30 ideator
+  # drafts. Auxiliary drafts do not consume the independent free-seed budget.
+  max_budget: 10
+  forced_exploration_steps: 10  # legacy scheduler field; immediate-lineage mode ignores it
+
+  # ── soundness = hard, fail-closed GATE ──
+  soundness_n: 5
+  soundness_floor: 60           # mean panel (0-9 -> 0-100)
+  soundness_fatal_threshold: 3
+  # One severe vote creates a repairable dispute; a strict 3/5 majority is hard-fatal.
+  soundness_fatal_min_votes: 3
+
+  # ── quality Q + diversity D gates ──
+  nb_min: 60                # quality: non-obviousness threshold
+  clarity_min: 60           # quality: mechanism-clarity threshold
+  feasibility_actionable_min: 60  # reporting only; NEVER an acceptance gate
+  diversity_D: 60           # accept as NEW only if novelty judge's diversity_score >= this
+  repair_margin: 20         # "near threshold" = within this of every failing gate -> repair queue
+  repair_diversity_D: 45    # a repair candidate must still be reasonably diverse
+
+  # ── bounded active/persistent memories ──
+  # One local slot per free seed prevents a potentially improvable seed from being evicted before
+  # its immediate polish chain. Free prompts receive compact signatures, not all full texts.
+  accepted_capacity: 10
+  # accepted_target is intentionally omitted: it is irrelevant to immediate-lineage processing.
+  accepted_refinement_limit: 2
+  novelty_branch_limit: 0       # disabled: branches would add extra discovery attempts per seed
+  # Immediate-lineage mode finishes a repair chain before the next free seed, so only one
+  # distinct repair lineage can be waiting at a time. This is storage capacity, not attempts.
+  repair_capacity: 1
+  repair_attempt_limit: 1  # one focused repair; shared K_aux leaves room for polishing if accepted
+  auxiliary_attempt_limit: 2  # shared repair+polish cap per free-seed lineage
+  # Soft polish aspirations, never acceptance gates. Feasibility remains non-gating and is
+  # disabled as a polish trigger by default; set >0 only for an explicit ablation.
+  press_nb_target: 90
+  press_soundness_target: 80
+  press_clarity_target: 80
+  press_feasibility_target: 0
+  rejected_pending_cap: 20
+  consolidate_every: 12     # consolidate rejected memory once this many pending accrue
+  signature_char_cap: 256   # per signature field
+  history_field_char_cap: 120  # problem/mechanism/novel-move chars in permanent prompt history
+
+  # No action probabilities: each free seed completes repair/polish immediately before the next.
+  relative_nb_max_retries: 2
+
+  # Weighted Q is used only after all hard gates pass.
+  early_nb_weight: 0.70
+  early_soundness_weight: 0.20
+  early_clarity_weight: 0.10
+  late_nb_weight: 0.40
+  late_soundness_weight: 0.40
+  late_clarity_weight: 0.20
+
+  # When Repair is selected, deterministically choose the highest-upside repair candidate.
+  repair_priority_novelty_weight: 0.50
+  repair_priority_closeness_weight: 0.35
+  repair_priority_remaining_weight: 0.15
+  # GateCloseness weights normalized deficits within repair_margin.
+  repair_closeness_soundness_weight: 0.55
+  repair_closeness_nb_weight: 0.15
+  repair_closeness_clarity_weight: 0.30
+
+  # Accepted refinement now means same-lineage polishing with a relative-NB non-regression check.
+  refinement_priority_novelty_weight: 0.60
+  refinement_priority_headroom_weight: 0.25
+  refinement_priority_remaining_weight: 0.15
+  refinement_headroom_soundness_weight: 0.65
+  refinement_headroom_clarity_weight: 0.35
+  seed: 0
+
+client:
+  # no global api_key_env -- every role below sets its own, since they don't all use the
+  # same provider (ideator is OpenAI, the rest are Gemini).
+  request_timeout: 3600
+
+agents:
+  ideator:
+    # gpt-5.6-sol, thinking high -- temperature/top_p omitted: OpenAI's reasoning models
+    # reject non-default values for these outright via Chat Completions.
+    model_id: gpt-5.6-sol
+    api_key_env: OPENAI_API_KEY
+    enable_thinking: true
+    thinking_effort: high
+    max_new_tokens: 8192
+
+  critic:
+    # one focused repair challenge per revision; never invoked for clear failures/duplicates
+    model_id: gemini-3.1-pro-preview
+    api_key_env: GEMINI_API_KEY
+    temperature: 1.0
+    top_p: 0.95
+    enable_thinking: true
+    thinking_effort: high
+    max_new_tokens: 4096
+
+  feedback:
+    # scores non-obviousness + mechanism clarity, and hosts the soundness panel
+    model_id: gemini-3.1-pro-preview
+    api_key_env: GEMINI_API_KEY
+    temperature: 1.0
+    top_p: 0.95
+    enable_thinking: true
+    thinking_effort: high
+    max_new_tokens: 8192
+
+  steno:
+    # compact signature extraction (cheap, structured)
+    model_id: gemini-2.5-flash
+    api_key_env: GEMINI_API_KEY
+    temperature: 1.0
+    top_p: 0.95
+    enable_thinking: false
+    max_new_tokens: 1024
+
+  judge:
+    # batched novelty judgment + rejected-memory consolidation (duplicate detection matters for Yield)
+    model_id: gemini-3.5-flash
+    api_key_env: GEMINI_API_KEY
+    temperature: 1.0
+    top_p: 0.95
+    enable_thinking: false
+    max_new_tokens: 2048

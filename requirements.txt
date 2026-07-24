@@ -1,0 +1,12 @@
+openai
+backoff
+PyYAML
+python-dotenv
+google-genai
+anthropic
+rich
+tqdm
+pytest
+sentence-transformers
+scikit-learn
+matplotlib

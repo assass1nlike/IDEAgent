@@ -1,0 +1,37 @@
+data:
+  input_jsonl: data/bkgd_papers.jsonl
+  output_dir: results_organized/generations/stateless-baseline
+
+baseline:
+  # Stateless independent: 10 fully independent generator calls per topic. Every call is
+  # byte-identical to the sequential-memory baseline's FIRST (empty-memory) call, so the only
+  # diversity pressure is background-relative — no cross-idea signal exists by design. This is
+  # the control isolating what sampling stochasticity alone buys vs signature memory.
+  mode: stateless
+  n_ideas: 10
+  init_topic_idx: 0
+  end_topic_idx: null
+  resume: true
+  min_idea_chars: 300
+  signature_char_cap: 256
+  # max_background_tokens: null
+
+client:
+  request_timeout: 3600
+
+generator:
+  # Exactly the same ideator model, reasoning effort, and per-candidate output cap as QD.
+  model_id: gpt-5.6-sol
+  api_key_env: OPENAI_API_KEY
+  enable_thinking: true
+  thinking_effort: low
+  max_new_tokens: 8192
+
+steno:
+  # Output-compatibility signatures only; never fed back to the generator.
+  model_id: gemini-2.5-flash
+  api_key_env: GEMINI_API_KEY
+  temperature: 1.0
+  top_p: 0.95
+  enable_thinking: false
+  max_new_tokens: 1024

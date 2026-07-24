@@ -1,0 +1,78 @@
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.pyre/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Local Python environments and tooling state
+.venv/
+.uv-bootstrap/
+.uv-cache/
+venv/
+env/
+.env
+.env.*
+.python-version
+pip-wheel-metadata/
+
+# Build and packaging artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
+*.egg
+
+# Notebooks, editors, and OS noise
+.ipynb_checkpoints/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# Local logs and process leftovers
+*.log
+*.out
+*.err
+*.pid
+*.pid.lock
+*.tmp
+*.temp
+nohup.out
+
+# Run outputs (generated, not shipped -- data/ itself IS tracked)
+/results/
+/results_organized/
+/logs/
+/runs/
+/outputs/
+/wandb/
+/mlruns/
+
+# Local model/runtime caches
+/.cache/
+/hf_cache/
+/huggingface_cache/
+
+# Model weights and large generated artifacts
+*.pt
+*.pth
+*.ckpt
+*.bin
+*.safetensors
+*.onnx
+*.gguf
+*.npz
+*.npy
+*.arrow
+*.parquet
