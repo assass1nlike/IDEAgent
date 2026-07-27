@@ -64,3 +64,19 @@ python scripts/eval_ideas.py \
 Pass `--skip-quality` or `--skip-diversity` to run only one half. `--start-idx`/
 `--end-idx` slice the topic list for sharding a run. `--max-workers` overrides
 both evaluators' concurrency.
+
+## Citation
+
+If you find our work is useful, please kindly cite:
+
+```bibtex
+@misc{gumma2026ideagentagenticqualitydiversitysearch,
+      title={IDEAgent: Agentic Quality-Diversity Search for Research Idea Generation}, 
+      author={Varun Gumma and Navonil Majumder and Soumitra Sinhahajari and Soujanya Poria},
+      year={2026},
+      eprint={2607.22375},
+      archivePrefix={arXiv},
+      primaryClass={cs.AI},
+      url={https://arxiv.org/abs/2607.22375}, 
+}
+```
