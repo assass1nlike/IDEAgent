@@ -18,6 +18,7 @@ if str(ROOT_DIR) not in sys.path:
 
 from ideagent.agents import CriticAgent, IdeatorAgent, QualityAgent
 from ideagent.clients import build_client
+from ideagent.request_checkpoint import configure, prepare_checkpoint
 from ideagent.experiment_logging import ExperimentLogger, TracedClient
 from ideagent.response_logging import AsyncResponseLogger
 from ideagent.utils import load_config
@@ -51,9 +52,26 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description="IDEAgent ideation search.")
     parser.add_argument("--config", type=Path, default=Path("configs/ideagent.yaml"))
+    parser.add_argument("--checkpoint-dir", type=Path, help="Persist requests and per-attempt outputs here")
+    parser.add_argument("--resume", action="store_true", help="Replay a run from --checkpoint-dir")
     args = parser.parse_args()
+    if args.resume and args.checkpoint_dir is None:
+        parser.error("--resume requires --checkpoint-dir")
 
     cfg = load_config(args.config)
+    journal = None
+    if args.checkpoint_dir is not None:
+        journal, cfg = prepare_checkpoint(cfg, args.checkpoint_dir, resume=args.resume)
+    configure(journal)
+    try:
+        run_config(cfg, args.config)
+    finally:
+        configure(None)
+        if journal is not None:
+            journal.close()
+
+
+def run_config(cfg: dict, config_path: Path) -> None:
     data, run = cfg.get("data", {}), cfg.get("run", {})
     client_cfg, agents_cfg = cfg.get("client", {}), cfg.get("agents", {})
     api_key_env = client_cfg.get("api_key_env", "GEMINI_API_KEY")
@@ -65,7 +83,7 @@ def main() -> None:
         a = agents_cfg.get(role) or {}
         model_id = a.get("model_id")
         if not model_id:
-            raise ValueError(f"agents.{role}.model_id must be set in {args.config}")
+            raise ValueError(f"agents.{role}.model_id must be set in {config_path}")
         # Per-role override so roles can mix providers (e.g. ideator on OpenAI, the rest on
         # Gemini) -- falls back to the global client.api_key_env when a role doesn't
         # specify its own, so existing single-provider configs are unaffected.
@@ -74,6 +92,7 @@ def main() -> None:
             model_id=model_id, vllm_port=int(a.get("port", 8000)),
             api_key_env=role_api_key_env, request_timeout=timeout,
         )
+        raw_client.checkpoint_role = role
         clients[role] = TracedClient(raw_client, logger=trace_logger, role=role)
         gen_kwargs[role] = _sampling(a)
         models[role] = model_id

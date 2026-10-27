@@ -68,6 +68,42 @@ Set the relevant API keys as environment variables or in a `.env` file
 python scripts/run_ideagent.py --config configs/ideagent.yaml
 ```
 
+### Resume interrupted API requests
+
+Start a run with a request journal:
+
+```bash
+python scripts/run_ideagent.py --config configs/ideagent.yaml --checkpoint-dir runs/my-search
+```
+
+After interruption, use the same config, input, code and Python environment:
+
+```bash
+python scripts/run_ideagent.py --config configs/ideagent.yaml --checkpoint-dir runs/my-search --resume
+```
+
+Successful API responses are committed to `requests.sqlite` before text extraction.
+Resume reconstructs the search by replaying those responses and sends unfinished
+requests again. Each attempt writes its outputs under `attempts/0001`, `attempts/0002`,
+etc., preserving earlier outputs. With `--checkpoint-dir`, these directories replace
+`data.output_dir`; the existing config-only topic resume behavior is unchanged when
+this flag is omitted.
+
+This works with the OpenAI, vLLM, Gemini and Claude clients, including parallel
+soundness panels and per-request fanout. Repeated identical prompts remain independent
+samples. Config/input/source/environment checks reject incompatible resumes, and a
+file lock prevents simultaneous use of a journal. API keys can be rotated without
+changing the checkpoint; only their environment-variable names occur in the config.
+The journal contains prompts and model responses, so keep it with private run artifacts.
+A response lost before its local commit must be requested again. Runs started without
+a journal cannot be resumed at request granularity. File locking requires Unix.
+
+Offline recovery tests (no model API calls):
+
+```bash
+python -m unittest tests.test_checkpoint -v
+```
+
 ## 🧪 Run a Baseline
 
 ```bash

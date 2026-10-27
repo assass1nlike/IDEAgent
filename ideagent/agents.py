@@ -644,8 +644,9 @@ def evaluate_soundness_multi(
     if prompt_cache_key:
         call_kwargs["prompt_cache_key"] = prompt_cache_key
 
-    def _one_call() -> dict[str, Any] | None:
-        raw = client.generate(messages, response_format=_QUALITY_RESPONSE_FORMAT, **call_kwargs)
+    def _one_call(index) -> dict[str, Any] | None:
+        raw = client.generate(messages, response_format=_QUALITY_RESPONSE_FORMAT,
+                              _checkpoint_slot=["soundness", index], **call_kwargs)
         obj = _extract_json_object(raw)
         if obj is None or "score" not in obj:
             return None
@@ -654,6 +655,6 @@ def evaluate_soundness_multi(
         return {"score": score, "rationale": rationale}
 
     with ThreadPoolExecutor(max_workers=max(1, n)) as executor:
-        futures = [executor.submit(_one_call) for _ in range(n)]
+        futures = [executor.submit(_one_call, index) for index in range(n)]
         results = [f.result() for f in futures]
     return [r for r in results if r is not None]
