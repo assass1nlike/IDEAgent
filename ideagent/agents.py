@@ -33,6 +33,7 @@ from ideagent.quality_eval import (
     _QUALITY_RESPONSE_FORMAT,
     _build_idea_user_message,
 )
+from ideagent.request_checkpoint import current as checkpoint_journal
 
 
 FEEDBACK_RUBRIC_IDS = (
@@ -645,8 +646,9 @@ def evaluate_soundness_multi(
         call_kwargs["prompt_cache_key"] = prompt_cache_key
 
     def _one_call(index) -> dict[str, Any] | None:
-        raw = client.generate(messages, response_format=_QUALITY_RESPONSE_FORMAT,
-                              _checkpoint_slot=["soundness", index], **call_kwargs)
+        # With a request journal, each parallel vote is labelled so resume gives it back its own answer.
+        slot = {"_checkpoint_slot": ["soundness", index]} if checkpoint_journal() is not None else {}
+        raw = client.generate(messages, response_format=_QUALITY_RESPONSE_FORMAT, **slot, **call_kwargs)
         obj = _extract_json_object(raw)
         if obj is None or "score" not in obj:
             return None

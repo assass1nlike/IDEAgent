@@ -18,7 +18,7 @@ if str(ROOT_DIR) not in sys.path:
 
 from ideagent.agents import CriticAgent, IdeatorAgent, QualityAgent
 from ideagent.clients import build_client
-from ideagent.request_checkpoint import configure, prepare_checkpoint
+from ideagent.request_checkpoint import ResumeError, configure, prepare_checkpoint, replay_aware
 from ideagent.experiment_logging import ExperimentLogger, TracedClient
 from ideagent.response_logging import AsyncResponseLogger
 from ideagent.utils import load_config
@@ -60,11 +60,13 @@ def main() -> None:
 
     cfg = load_config(args.config)
     journal = None
-    if args.checkpoint_dir is not None:
-        journal, cfg = prepare_checkpoint(cfg, args.checkpoint_dir, resume=args.resume)
-    configure(journal)
     try:
+        if args.checkpoint_dir is not None:
+            journal, cfg = prepare_checkpoint(cfg, args.checkpoint_dir, resume=args.resume)
+        configure(journal)
         run_config(cfg, args.config)
+    except ResumeError as error:
+        sys.exit(f"error: {error}")
     finally:
         configure(None)
         if journal is not None:
@@ -77,7 +79,7 @@ def run_config(cfg: dict, config_path: Path) -> None:
     api_key_env = client_cfg.get("api_key_env", "GEMINI_API_KEY")
     timeout = float(client_cfg.get("request_timeout", 3600))
 
-    trace_logger = ExperimentLogger(Path(data["output_dir"]) / "experiment_trace.jsonl")
+    trace_logger = replay_aware(ExperimentLogger(Path(data["output_dir"]) / "experiment_trace.jsonl"))
     clients, gen_kwargs, models = {}, {}, {}
     for role in ROLES:
         a = agents_cfg.get(role) or {}
@@ -162,7 +164,7 @@ def run_config(cfg: dict, config_path: Path) -> None:
         seed=int(run.get("seed", 0)),
     )
 
-    response_logger = AsyncResponseLogger(root_path=Path(config.output_dir) / "responses")
+    response_logger = replay_aware(AsyncResponseLogger(root_path=Path(config.output_dir) / "responses"))
     ideator = IdeatorAgent(role="ideator", client=clients["ideator"], gen_kwargs=gen_kwargs["ideator"],
                            response_logger=response_logger, conv_sliding_window=None)
     critic = CriticAgent(role="critic", client=clients["critic"], gen_kwargs=gen_kwargs["critic"],

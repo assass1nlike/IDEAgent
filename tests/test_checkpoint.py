@@ -15,7 +15,7 @@ from unittest.mock import patch
 import httpx
 from openai import OpenAI
 from ideagent.clients import OpenAIClient
-from ideagent.request_checkpoint import RequestJournal, configure, prepare_checkpoint
+from ideagent.request_checkpoint import RequestJournal, ResumeError, configure, prepare_checkpoint
 
 
 def response(text):
@@ -158,30 +158,27 @@ class CheckpointTest(unittest.TestCase):
             self.assertEqual(next(iter(extra))[0],'quality')
             self.assertFalse(expected-actual)
 
-    def test_attempts_preserved_and_changed_configuration_rejected(self):
+    def test_resume_continues_in_the_same_output_dir(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
-            input_file = root / 'input.jsonl'
-            input_file.write_text('{"topic_id": "test"}\n')
-            config = {'data': {'input_jsonl': str(input_file), 'output_dir': 'unused'},
-                      'run': {'max_budget': 2, 'seed': 17}}
+            config = {'data': {'input_jsonl': 'unused', 'output_dir': str(root / 'out')},
+                      'run': {'max_budget': 2, 'resume': False}}
             journal, first = prepare_checkpoint(config, root / 'run')
             journal.close()
             journal, second = prepare_checkpoint(config, root / 'run', resume=True)
             journal.close()
-            self.assertNotEqual(first['data']['output_dir'], second['data']['output_dir'])
-            self.assertTrue(Path(first['data']['output_dir'], 'config.json').exists())
-            config['run']['max_budget'] = 3
-            with self.assertRaisesRegex(ValueError, 'Resume configuration differs'):
-                prepare_checkpoint(config, root / 'run', resume=True)
-            self.assertFalse((root / 'run/attempts/0003').exists())
+            # A new run keeps the configured topic-level resume; a resumed run always skips finished topics.
+            self.assertEqual((first['data']['output_dir'], first['run']['resume']), (str(root / 'out'), False))
+            self.assertEqual((second['data']['output_dir'], second['run']['resume']), (str(root / 'out'), True))
+            self.assertFalse(config['run']['resume'])
+            self.assertEqual(sorted(p.name for p in (root / 'run').iterdir()), ['requests.lock', 'requests.sqlite'])
 
     def test_changed_parameters_rejected_and_active_run_locked(self):
         with TemporaryDirectory() as root:
             path=Path(root)/'requests.sqlite';j=RequestJournal(path,{'max_tokens':32000})
             with self.assertRaises(RuntimeError): RequestJournal(path,{'max_tokens':32000},resume=True)
             j.close()
-            with self.assertRaises(ValueError): RequestJournal(path,{'max_tokens':64000},resume=True)
+            with self.assertRaises(ResumeError): RequestJournal(path,{'max_tokens':64000},resume=True)
             j=RequestJournal(path,{'max_tokens':32000},resume=True);j.close()
 
 
@@ -256,6 +253,10 @@ class ProviderCheckpointTest(unittest.TestCase):
                     self.assertEqual(c.generate_many(messages, n=3), ['answer'] * 3)
                     self.assertEqual(sync.call_count, 0 if resume else 4)
                     self.assertEqual(async_.call_count, 0 if resume else 1)
+                    if not resume:
+                        # Force replay through raw-response reconstruction rather than final text.
+                        journal.db.execute('UPDATE calls SET response=NULL')
+                        journal.db.commit()
                     journal.close()
 
     def test_vllm_dict_response_and_native_multi_candidate_replay(self):
@@ -280,12 +281,12 @@ class ProviderCheckpointTest(unittest.TestCase):
                     journal.db.commit()
                 journal.close()
 
-    def test_native_cli_replays_into_new_attempt_and_checks_input(self):
+    def test_native_cli_resumes_in_output_dir_and_refuses_model_change(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
             input_file = root / 'input.jsonl'
             input_file.write_text('')
-            config = {'data': {'input_jsonl': str(input_file), 'output_dir': 'unused'},
+            config = {'data': {'input_jsonl': str(input_file), 'output_dir': str(root / 'out')},
                       'run': {'max_budget': 1, 'seed': 17},
                       'agents': {role: {'model_id': 'gpt-test', 'api_key_env': 'TEST_API_KEY'}
                                  for role in ('ideator', 'critic', 'quality', 'steno', 'judge')}}
@@ -297,13 +298,15 @@ class ProviderCheckpointTest(unittest.TestCase):
                 result = subprocess.run(command + suffix, env={**os.environ, 'TEST_API_KEY': 'unused'},
                                         capture_output=True, text=True)
                 self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertTrue((root / 'run/attempts/0001/final_idea_cores.jsonl').exists())
-            self.assertTrue((root / 'run/attempts/0002/final_idea_cores.jsonl').exists())
-            input_file.write_text('changed input')
+            self.assertTrue((root / 'out/final_idea_cores.jsonl').exists())
+            self.assertFalse((root / 'run/attempts').exists())
+            config['agents']['ideator']['model_id'] = 'gpt-other'
+            config_file.write_text(json.dumps(config))
             result = subprocess.run(command + ['--resume'], env={**os.environ, 'TEST_API_KEY': 'unused'},
                                     capture_output=True, text=True)
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn('Resume configuration differs', result.stderr)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn('error: Cannot resume: agents.ideator.model_id (gpt-test → gpt-other)', result.stderr)
+            self.assertNotIn('Traceback', result.stderr)
 
     def test_no_checkpoint_keeps_independent_sampling(self):
         configure(None)
@@ -316,6 +319,145 @@ class ProviderCheckpointTest(unittest.TestCase):
             messages = [{'role': 'user', 'content': 'same'}]
             self.assertEqual(c.generate(messages), '1')
             self.assertEqual(c.generate(messages), '2')
+
+
+class ResumePolicyTest(unittest.TestCase):
+    def tearDown(self):
+        configure(None)
+
+    def test_unfinished_call_gets_fresh_retries_after_exhausting_them(self):
+        messages = [{'role': 'user', 'content': 'question'}]
+        sends = []
+        def handler(content):
+            def send(request):
+                sends.append(content)
+                return response(content)
+            return send
+        with TemporaryDirectory() as root, patch('time.sleep'):
+            path = Path(root) / 'requests.sqlite'
+            journal = RequestJournal(path, {})
+            c = client(journal, handler(''))
+            with c.client, self.assertRaises(ValueError):
+                c.generate(messages)
+            journal.close()
+            journal = RequestJournal(path, {}, resume=True)
+            c = client(journal, handler('answer'))
+            with c.client:
+                self.assertEqual(c.generate(messages), 'answer')
+            journal.close()
+        # Only the last empty response is replayed; the retry loop then sends a new request.
+        self.assertEqual(sends, [''] * 5 + ['answer'])
+
+    def test_resume_allows_settings_that_leave_requests_unchanged(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            def config(**run):
+                return {'data': {'input_jsonl': 'unused', 'output_dir': 'unused'},
+                        'run': {'max_budget': 2, **run}, 'client': {'request_timeout': 3600},
+                        'agents': {'ideator': {'model_id': 'gpt-test', 'api_key_env': 'A', 'port': 8000}}}
+            journal, _ = prepare_checkpoint(config(), root / 'run')
+            journal.close()
+            with self.assertRaisesRegex(ResumeError, '--resume'):
+                prepare_checkpoint(config(), root / 'run')
+            changed = config(max_budget=3)
+            changed['client']['request_timeout'] = 60
+            changed['agents']['ideator'].update(api_key_env='B', port=8001)
+            with patch.dict(os.environ, OPENAI_BASE_URL='https://proxy.example/v1'):
+                journal, _ = prepare_checkpoint(changed, root / 'run', resume=True)
+            journal.close()
+
+    def test_changed_role_settings_refuse_resume(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / 'run'
+            def config(**ideator):
+                return {'data': {'input_jsonl': 'unused', 'output_dir': 'unused'},
+                        'agents': {'ideator': {'model_id': 'gpt-a', 'temperature': 1.0, **ideator}}}
+            journal, _ = prepare_checkpoint(config(), root)
+            journal.reserve({'request': 'sent to gpt-a'})
+            journal.close()
+            refusals = [(config(model_id='gpt-b'), r'agents\.ideator\.model_id \(gpt-a → gpt-b\)'),
+                        (config(temperature=0.5), r'agents\.ideator\.temperature \(1\.0 → 0\.5\)')]
+            for changed, reason in refusals:
+                with self.assertRaisesRegex(ResumeError, f'Cannot resume: {reason}.*start afresh'):
+                    prepare_checkpoint(changed, root, resume=True)
+            # Nothing was touched: the saved call is still there.
+            db = sqlite3.connect(root / 'requests.sqlite')
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM calls').fetchone()[0], 1)
+            db.close()
+
+    def test_changed_prompt_is_sent_fresh_on_resume(self):
+        sends = []
+        def handler(request):
+            sends.append(json.loads(request.content)['messages'][0]['content'])
+            return response('answer')
+        def ask(c, prompt):
+            return c.generate([{'role': 'user', 'content': prompt}])
+        with TemporaryDirectory() as root:
+            path = Path(root) / 'requests.sqlite'
+            for resume, prompts in ((False, ('first', 'second')), (True, ('first', 'second, reworded'))):
+                journal = RequestJournal(path, {}, resume=resume)
+                c = client(journal, handler)
+                with c.client:
+                    for prompt in prompts:
+                        ask(c, prompt)
+                journal.close()
+        # Prompts are not checked: the unchanged one is replayed and the reworded one sent.
+        self.assertEqual(sends, ['first', 'second', 'second, reworded'])
+
+    def test_resume_logs_nothing_twice(self):
+        from ideagent.experiment_logging import ExperimentLogger, TracedClient
+        from ideagent.request_checkpoint import replay_aware
+        from ideagent.response_logging import AsyncResponseLogger
+        def answer(request):
+            return response('answer to ' + json.loads(request.content)['messages'][0]['content'])
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            def launch(resume, prompts):
+                journal = RequestJournal(root / 'requests.sqlite', {}, resume=resume)
+                c = client(journal, answer)
+                trace = replay_aware(ExperimentLogger(root / 'experiment_trace.jsonl'))
+                traced = TracedClient(c, logger=trace, role='ideator')
+                with c.client, replay_aware(AsyncResponseLogger(root_path=root / 'responses')) as responses:
+                    trace.log('topic_started', topic_id='t')
+                    for prompt in prompts:
+                        text = traced.generate([{'role': 'user', 'content': prompt}])
+                        responses.log(role='ideator', event='open', text=text,
+                                      metadata={'topic_id': 't', 'target_paper_id': prompt})
+                        trace.log('candidate_evaluated', topic_id='t', prompt=prompt)
+                journal.close()
+            launch(False, ['first', 'second'])          # interrupted after two calls
+            launch(True, ['first', 'second', 'third'])  # rebuilds those two, then continues
+            rows = [json.loads(line) for line in (root / 'experiment_trace.jsonl').read_text().splitlines()]
+            self.assertEqual([row['event'] for row in rows],
+                             ['topic_started'] + ['model_call_started', 'model_call_completed', 'candidate_evaluated'] * 3)
+            # The first seven rows come from the interrupted launch, the last three from the resumed one.
+            first_run, resumed_run = rows[0]['run_id'], rows[7]['run_id']
+            self.assertNotEqual(first_run, resumed_run)
+            self.assertEqual([row['run_id'] for row in rows], [first_run] * 7 + [resumed_run] * 3)
+            for prompt in ('first', 'second', 'third'):
+                lines = (root / 'responses' / 't' / f'ep{prompt}' / 'ideator.jsonl').read_text().splitlines()
+                self.assertEqual([json.loads(line)['text'] for line in lines], ['answer to ' + prompt])
+            # Without a journal the loggers are used exactly as they are.
+            configure(None)
+            logger = ExperimentLogger(root / 'other.jsonl')
+            self.assertIs(replay_aware(logger), logger)
+
+    def test_journal_rebuilds_only_known_response_types(self):
+        with TemporaryDirectory() as root:
+            journal = RequestJournal(Path(root) / 'requests.sqlite', {})
+            ticket, _, _ = journal.reserve({'request': 1})
+            with self.assertRaises(TypeError):
+                journal.save_response(ticket, 0, object())
+            journal.save_response(ticket, 0, {'choices': []})
+            self.assertEqual(journal.raw_response(ticket, 0), {'choices': []})
+            # Neither a name outside the allowlist nor the old module/class form is imported.
+            for stored in ({'type': 'os.system', 'data': 'echo'}, {'module': 'os', 'class': 'system', 'data': 'echo'}):
+                journal.db.execute('UPDATE responses SET response=?', (json.dumps(stored),))
+                with patch('importlib.import_module') as imported, \
+                        self.assertRaisesRegex(ValueError, 'unsupported response type'):
+                    journal.raw_response(ticket, 0)
+                imported.assert_not_called()
+            journal.close()
 
 
 if __name__ == "__main__":

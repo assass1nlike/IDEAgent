@@ -7,6 +7,9 @@
 
 ## 📝 Changelog
 
+- **2026-10-28**: Added request-level checkpoint/resume to `scripts/run_ideagent.py`
+  (`--checkpoint-dir`, `--resume`): an interrupted search replays its saved responses and
+  re-sends only unfinished requests ([#3](https://github.com/declare-lab/IDEAgent/pull/3)).
 - **2026-10-20**: Added `verifiable/`: IDEAgent on AlphaResearch and ALE-Bench, the
   four baselines under the same program condition, and the Yield evaluation under the
   three-judge diversity jury.
@@ -76,33 +79,21 @@ Start a run with a request journal:
 python scripts/run_ideagent.py --config configs/ideagent.yaml --checkpoint-dir runs/my-search
 ```
 
-After interruption, use the same config, input, code and Python environment:
+After interruption, run the same command with `--resume`:
 
 ```bash
 python scripts/run_ideagent.py --config configs/ideagent.yaml --checkpoint-dir runs/my-search --resume
 ```
 
-Successful API responses are committed to `requests.sqlite` before text extraction.
-Resume reconstructs the search by replaying those responses and sends unfinished
-requests again. Each attempt writes its outputs under `attempts/0001`, `attempts/0002`,
-etc., preserving earlier outputs. With `--checkpoint-dir`, these directories replace
-`data.output_dir`; the existing config-only topic resume behavior is unchanged when
-this flag is omitted.
+Every API response is saved to `requests.sqlite` in the checkpoint directory as it
+arrives, and outputs go to `data.output_dir` as usual. On `--resume`, topics that
+already finished are skipped, and the unfinished topic is rebuilt from the saved
+responses without calling the API or logging anything again. The run then continues
+from where it stopped, adding to the same outputs.
 
-This works with the OpenAI, vLLM, Gemini and Claude clients, including parallel
-soundness panels and per-request fanout. Repeated identical prompts remain independent
-samples. Config/input/source/environment checks reject incompatible resumes, and a
-file lock prevents simultaneous use of a journal. API keys can be rotated without
-changing the checkpoint; only their environment-variable names occur in the config.
-The journal contains prompts and model responses, so keep it with private run artifacts.
-A response lost before its local commit must be requested again. Runs started without
-a journal cannot be resumed at request granularity. File locking requires Unix.
-
-Offline recovery tests (no model API calls):
-
-```bash
-python -m unittest tests.test_checkpoint -v
-```
+If a role's model or generation settings (`temperature`, `max_new_tokens`, thinking,
+...) changed since the run started, `--resume` stops with an error naming the change:
+undo it to resume, or start afresh without `--resume` in a new `--checkpoint-dir`.
 
 ## 🧪 Run a Baseline
 
